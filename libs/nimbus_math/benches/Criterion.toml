@@ -1,0 +1,21 @@
+# Criterion.rs configuration file
+# See https://docs.rs/criterion/latest/criterion/struct.Criterion.html
+
+# How many samples to take
+sample_size = 100
+
+# How many resamples to use for bootstrapping
+nresamples = 100000
+
+# How many measurements to take per sample
+measurement_time = "5s"
+
+# How long to warm up before measuring
+warm_up_time = "3s"
+
+# Plotting configuration
+plotting.backend = "plotters"
+
+# Output directory for plots
+output_directory = "target/criterion"
+
