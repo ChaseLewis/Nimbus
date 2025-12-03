@@ -13,6 +13,7 @@ pub use tasks::Tasks;
 use std::any::{type_name, TypeId};
 use std::fmt;
 
+use crate::parallel_world::ParamAccess;
 use crate::world::UnsafeWorldCell;
 
 /// Error returned when a system parameter cannot be fetched from the world.
@@ -75,6 +76,15 @@ pub trait SystemParam: Sized {
     fn is_event_reader() -> bool {
         Self::event_type_id().is_some()
     }
+
+    /// Returns the access pattern for this parameter.
+    /// 
+    /// Used by the parallel scheduler to determine which systems can
+    /// run concurrently without conflicts.
+    fn access() -> ParamAccess {
+        // Default: no access (safe to run in parallel with anything)
+        ParamAccess::none()
+    }
 }
 
 pub type SystemParamItem<'w, 's, P> = <P as SystemParam>::Item<'w, 's>;
@@ -113,6 +123,12 @@ macro_rules! impl_system_param_tuple {
             ) -> Result<Self::Item<'w, 's>, SystemParamError> {
                 let ($($param,)*) = state;
                 Ok(($(<$param as SystemParam>::from_world_with_state(world, $param)?,)*))
+            }
+
+            fn access() -> ParamAccess {
+                let mut access = ParamAccess::none();
+                $(access.merge(&<$param as SystemParam>::access());)*
+                access
             }
         }
     }

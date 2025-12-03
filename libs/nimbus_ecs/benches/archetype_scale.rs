@@ -34,7 +34,9 @@ macro_rules! define_filler_components {
 // ============================================================================
 
 mod nimbus {
-    use nimbus_ecs::{App, Component, Query, World};
+    use nimbus_ecs::{Component, Query, World, SystemPriority};
+    use nimbus_ecs::scheduler::{ParallelPriorityScheduler, Scheduler};
+    use nimbus_ecs::task::TaskPool;
 
     #[derive(Component, Clone, Copy, Default)]
     pub struct Position {
@@ -168,10 +170,119 @@ mod nimbus {
         }
     }
     
-    /// Wrap setup_world in an App for scheduler benchmarks
-    pub fn setup_app() -> App {
-        App::from_parts(setup_world(), nimbus_ecs::scheduler::PriorityScheduler::new())
+    /// App-like struct using ParallelPriorityScheduler for benchmarks
+    pub struct ParallelApp {
+        pub world: World,
+        pub scheduler: ParallelPriorityScheduler<SystemPriority>,
     }
+
+    impl ParallelApp {
+        pub fn new() -> Self {
+            let mut world = setup_world();
+            world.insert_singleton(TaskPool::new());
+            Self {
+                world,
+                scheduler: ParallelPriorityScheduler::new(),
+            }
+        }
+
+        pub fn register_system<M>(&mut self, priority: SystemPriority, system: impl nimbus_ecs::IntoSystem<M>) {
+            self.scheduler.register(priority, system);
+        }
+
+        pub fn run(&mut self) -> Result<(), nimbus_ecs::SystemParamError> {
+            self.scheduler.run(&mut self.world)
+        }
+    }
+
+    /// Wrap setup_world in a ParallelApp for scheduler benchmarks
+    /// Uses ParallelPriorityScheduler with TaskPool for fair comparison with Bevy
+    pub fn setup_app() -> ParallelApp {
+        ParallelApp::new()
+    }
+
+    // ========================================================================
+    // Parallel systems benchmark components and setup
+    // ========================================================================
+
+    // 10 independent components for parallel system testing
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataA { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataB { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataC { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataD { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataE { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataF { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataG { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataH { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataI { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataJ { pub value: f32 }
+
+    /// Setup world with 10,000 entities per component type (100,000 total)
+    /// Each entity has only ONE component so systems can run in parallel
+    pub fn setup_parallel_world() -> World {
+        let mut world = World::new();
+        const ENTITIES_PER_TYPE: usize = 10_000;
+        
+        for i in 0..ENTITIES_PER_TYPE {
+            let v = i as f32;
+            world.spawn_with(DataA { value: v });
+            world.spawn_with(DataB { value: v });
+            world.spawn_with(DataC { value: v });
+            world.spawn_with(DataD { value: v });
+            world.spawn_with(DataE { value: v });
+            world.spawn_with(DataF { value: v });
+            world.spawn_with(DataG { value: v });
+            world.spawn_with(DataH { value: v });
+            world.spawn_with(DataI { value: v });
+            world.spawn_with(DataJ { value: v });
+        }
+        
+        world
+    }
+
+    /// Setup parallel app with 10 independent systems
+    pub fn setup_parallel_app() -> ParallelApp {
+        let mut world = setup_parallel_world();
+        world.insert_singleton(TaskPool::with_threads(8));
+        let mut scheduler = ParallelPriorityScheduler::new();
+        
+        // Register 10 systems that can all run in parallel
+        scheduler.register(SystemPriority::Update, system_a);
+        scheduler.register(SystemPriority::Update, system_b);
+        scheduler.register(SystemPriority::Update, system_c);
+        scheduler.register(SystemPriority::Update, system_d);
+        scheduler.register(SystemPriority::Update, system_e);
+        scheduler.register(SystemPriority::Update, system_f);
+        scheduler.register(SystemPriority::Update, system_g);
+        scheduler.register(SystemPriority::Update, system_h);
+        scheduler.register(SystemPriority::Update, system_i);
+        scheduler.register(SystemPriority::Update, system_j);
+        
+        ParallelApp { world, scheduler }
+    }
+
+    // 10 independent systems - each operates on a different component
+    pub fn system_a(mut q: Query<&mut DataA>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_b(mut q: Query<&mut DataB>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_c(mut q: Query<&mut DataC>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_d(mut q: Query<&mut DataD>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_e(mut q: Query<&mut DataE>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_f(mut q: Query<&mut DataF>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_g(mut q: Query<&mut DataG>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_h(mut q: Query<&mut DataH>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_i(mut q: Query<&mut DataI>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_j(mut q: Query<&mut DataJ>) { for d in q.iter() { d.value = d.value * 1.01 + 0.5; } }
+
 }
 
 // ============================================================================
@@ -290,6 +401,86 @@ mod bevy {
             pos.y += 1.0;
         }
     }
+
+    // ========================================================================
+    // Parallel systems benchmark components and setup
+    // ========================================================================
+
+    // 10 independent components for parallel system testing
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataA { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataB { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataC { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataD { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataE { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataF { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataG { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataH { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataI { pub value: f32 }
+    #[derive(Component, Clone, Copy, Default)]
+    pub struct DataJ { pub value: f32 }
+
+    /// Setup world with 10,000 entities per component type (100,000 total)
+    pub fn setup_parallel_world() -> World {
+        let mut world = World::new();
+        const ENTITIES_PER_TYPE: usize = 10_000;
+        
+        for i in 0..ENTITIES_PER_TYPE {
+            let v = i as f32;
+            world.spawn(DataA { value: v });
+            world.spawn(DataB { value: v });
+            world.spawn(DataC { value: v });
+            world.spawn(DataD { value: v });
+            world.spawn(DataE { value: v });
+            world.spawn(DataF { value: v });
+            world.spawn(DataG { value: v });
+            world.spawn(DataH { value: v });
+            world.spawn(DataI { value: v });
+            world.spawn(DataJ { value: v });
+        }
+        
+        world
+    }
+
+    /// Setup schedule with 10 independent systems that can run in parallel
+    pub fn setup_parallel_schedule() -> bevy_ecs::schedule::Schedule {
+        use bevy_ecs::schedule::Schedule;
+        
+        let mut schedule = Schedule::default();
+        schedule.add_systems((
+            system_a,
+            system_b,
+            system_c,
+            system_d,
+            system_e,
+            system_f,
+            system_g,
+            system_h,
+            system_i,
+            system_j,
+        ));
+        schedule
+    }
+
+    // 10 independent systems - each operates on a different component
+    pub fn system_a(mut q: bevy_ecs::prelude::Query<&mut DataA>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_b(mut q: bevy_ecs::prelude::Query<&mut DataB>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_c(mut q: bevy_ecs::prelude::Query<&mut DataC>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_d(mut q: bevy_ecs::prelude::Query<&mut DataD>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_e(mut q: bevy_ecs::prelude::Query<&mut DataE>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_f(mut q: bevy_ecs::prelude::Query<&mut DataF>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_g(mut q: bevy_ecs::prelude::Query<&mut DataG>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_h(mut q: bevy_ecs::prelude::Query<&mut DataH>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_i(mut q: bevy_ecs::prelude::Query<&mut DataI>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
+    pub fn system_j(mut q: bevy_ecs::prelude::Query<&mut DataJ>) { for mut d in q.iter_mut() { d.value = d.value * 1.01 + 0.5; } }
 }
 
 // ============================================================================
@@ -542,6 +733,149 @@ fn bench_query_creation(c: &mut Criterion) {
     group.finish();
 }
 
+// ============================================================================
+// Benchmark: 10 parallel systems
+// Tests parallel execution of independent systems
+// ============================================================================
+
+fn bench_parallel_systems(c: &mut Criterion) {
+    let mut group = c.benchmark_group("parallel_systems_10");
+    group.sample_size(50);
+
+    // Nimbus SEQUENTIAL scheduler (baseline - no parallelism overhead)
+    group.bench_function("nimbus_sequential", |b| {
+        use nimbus_ecs::scheduler::{PriorityScheduler, Scheduler};
+        
+        let mut world = nimbus::setup_parallel_world();
+        let mut scheduler: PriorityScheduler<nimbus_ecs::SystemPriority> = PriorityScheduler::new();
+        
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_a);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_b);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_c);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_d);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_e);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_f);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_g);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_h);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_i);
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_j);
+        
+        // Warm up
+        let _ = scheduler.run(&mut world);
+
+        b.iter(|| {
+            scheduler.run(&mut world).unwrap();
+        });
+    });
+
+    // Nimbus PARALLEL scheduler
+    group.bench_function("nimbus_parallel", |b| {
+        let mut app = nimbus::setup_parallel_app();
+        // Warm up
+        let _ = app.run();
+
+        b.iter(|| {
+            app.run().unwrap();
+        });
+    });
+
+    // Bevy with its default parallel execution
+    group.bench_function("bevy_parallel", |b| {
+        let mut world = bevy::setup_parallel_world();
+        let mut schedule = bevy::setup_parallel_schedule();
+        // Warm up
+        schedule.run(&mut world);
+
+        b.iter(|| {
+            schedule.run(&mut world);
+        });
+    });
+
+    group.finish();
+}
+
+// ============================================================================
+// Benchmark: Single system iteration speed (no scheduler overhead)
+// ============================================================================
+
+fn bench_single_system_iteration(c: &mut Criterion) {
+    let mut group = c.benchmark_group("single_system_10k");
+    group.sample_size(100);
+
+    // Nimbus - run_system (creates new system each call - NO caching)
+    group.bench_function("nimbus_uncached", |b| {
+        let mut world = nimbus::setup_parallel_world();
+        // Warm up
+        world.run_system(nimbus::system_a).unwrap();
+
+        b.iter(|| {
+            world.run_system(nimbus::system_a).unwrap();
+        });
+    });
+
+    // Nimbus - persistent system via scheduler (CACHED state)
+    group.bench_function("nimbus_cached", |b| {
+        use nimbus_ecs::scheduler::{PriorityScheduler, Scheduler};
+        
+        let mut world = nimbus::setup_parallel_world();
+        let mut scheduler: PriorityScheduler<nimbus_ecs::SystemPriority> = PriorityScheduler::new();
+        scheduler.register(nimbus_ecs::SystemPriority::Update, nimbus::system_a);
+        
+        // Warm up - first run populates the cache
+        let _ = scheduler.run(&mut world);
+
+        b.iter(|| {
+            scheduler.run(&mut world).unwrap();
+        });
+    });
+
+    // Bevy - SystemState approach (cached state)
+    group.bench_function("bevy_cached", |b| {
+        let mut world = bevy::setup_parallel_world();
+        let mut system_state: bevy_ecs::system::SystemState<
+            bevy_ecs::prelude::Query<&mut bevy::DataA>,
+        > = bevy_ecs::system::SystemState::new(&mut world);
+        
+        // Warm up
+        {
+            let mut query = system_state.get_mut(&mut world);
+            for mut d in query.iter_mut() { d.value = d.value * 1.01 + 0.5; }
+        }
+
+        b.iter(|| {
+            let mut query = system_state.get_mut(&mut world);
+            for mut d in query.iter_mut() {
+                d.value = d.value * 1.01 + 0.5;
+            }
+        });
+    });
+
+    // Nimbus - pure query iteration (no scheduler)
+    group.bench_function("nimbus_query_only", |b| {
+        let mut world = nimbus::setup_parallel_world();
+        
+        b.iter(|| {
+            let mut query = world.query::<&mut nimbus::DataA>();
+            for d in query.iter() {
+                d.value = d.value * 1.01 + 0.5;
+            }
+        });
+    });
+
+    // Raw loop comparison - just iterating values
+    group.bench_function("raw_vec", |b| {
+        let mut values: Vec<f32> = (0..10000).map(|i| i as f32).collect();
+        
+        b.iter(|| {
+            for v in values.iter_mut() {
+                *v = *v * 1.01 + 0.5;
+            }
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_iterate_movement,
@@ -550,5 +884,7 @@ criterion_group!(
     bench_cached_system_rerun,
     bench_first_vs_cached,
     bench_query_creation,
+    bench_parallel_systems,
+    bench_single_system_iteration,
 );
 criterion_main!(benches);

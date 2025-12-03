@@ -16,9 +16,11 @@
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     commands::{CommandQueue, ParallelCommandBuffers},
+    parallel_world::ParallelWorldCell,
     system_param::SystemParamError,
     systems::System,
     task::TaskPool,
@@ -108,11 +110,13 @@ impl Default for ParallelPass {
 
 impl ParallelPass {
     fn add(&mut self, id: SystemId, system: Box<dyn System>) {
-        // For now, assume all systems have exclusive access (conservative)
-        // TODO: Extract actual access from system parameters
+        // Extract actual access from system parameters
+        let param_access = system.access();
         let access = SystemAccess {
-            exclusive: true, // Conservative default
-            ..Default::default()
+            reads: param_access.reads,
+            writes: param_access.writes,
+            uses_commands: false, // Commands don't conflict - each system gets its own buffer
+            exclusive: param_access.exclusive,
         };
 
         let is_event_reader = system.is_event_reader();
@@ -265,13 +269,12 @@ impl ParallelPass {
         &mut self,
         world: &mut World,
         buffers: &ParallelCommandBuffers,
-        _pool: &TaskPool,
+        pool: &TaskPool,
     ) -> Result<(), SystemParamError> {
         // Compute batches if needed
         self.compute_batches();
 
         // Event handlers run sequentially (order matters for events)
-        // They share a single buffer since they run one at a time
         for sys in &mut self.events {
             if sys.enabled {
                 let buffer = buffers.claim();
@@ -279,16 +282,71 @@ impl ParallelPass {
             }
         }
 
-        // Run batches - each system in a batch uses its own buffer
-        // NOTE: Still running sequentially within batches because systems need &mut World
-        // True parallelism requires thread-safe World access (next step)
+        // Run batches in parallel
         if let Some(batches) = &self.batches {
+            // Create thread-safe world cell for parallel access
+            let world_cell = ParallelWorldCell::new(world);
+            let had_error = AtomicBool::new(false);
+
             for batch in batches {
-                // TODO: Replace this sequential loop with pool.scope() when
-                // we have thread-safe World access
-                for &idx in &batch.systems {
+                if batch.systems.len() == 1 {
+                    // Single system - run directly (avoid scope overhead)
+                    let idx = batch.systems[0];
                     let buffer = buffers.claim();
-                    self.systems[idx].system.run_with_buffer(world, buffer)?;
+                    // SAFETY: Single system has exclusive access
+                    let world_mut = unsafe { world_cell.world_mut() };
+                    if self.systems[idx].system.run_with_buffer(world_mut, buffer).is_err() {
+                        had_error.store(true, Ordering::Relaxed);
+                    }
+                } else {
+                    // Multiple systems - run in parallel
+                    // Wrap raw pointers in a Send wrapper for safe cross-thread transfer
+                    struct SendSystemPtr(*mut Box<dyn System>);
+                    // SAFETY: We ensure each pointer is only accessed by one thread
+                    // and Systems are required to be Send
+                    unsafe impl Send for SendSystemPtr {}
+                    
+                    impl SendSystemPtr {
+                        unsafe fn get(&self) -> &mut Box<dyn System> {
+                            unsafe { &mut *self.0 }
+                        }
+                    }
+
+                    let system_ptrs: Vec<_> = batch.systems.iter()
+                        .map(|&idx| SendSystemPtr(&mut self.systems[idx].system as *mut _))
+                        .collect();
+
+                    pool.scope(|s| {
+                        for send_ptr in system_ptrs {
+                            let world_cell = &world_cell;
+                            let had_error = &had_error;
+                            let buffers = &*buffers;
+
+                            s.spawn(move |_| {
+                                // Claim buffer inside the thread (buffers is Sync)
+                                let buffer = buffers.claim();
+                                
+                                // SAFETY: 
+                                // 1. Each system_ptr is unique (from different indices)
+                                // 2. Access tracking ensures no component conflicts within batch
+                                // 3. The scope ensures all spawned work completes before we continue
+                                let system = unsafe { send_ptr.get() };
+                                let world_mut = unsafe { world_cell.world_mut() };
+                                
+                                if system.run_with_buffer(world_mut, buffer).is_err() {
+                                    had_error.store(true, Ordering::Relaxed);
+                                }
+                            });
+                        }
+                    });
+                }
+
+                if had_error.load(Ordering::Relaxed) {
+                    // For now, just report a generic error
+                    // In the future, we could collect and report specific errors
+                    return Err(SystemParamError::SingletonNotFound { 
+                        type_name: "parallel execution error" 
+                    });
                 }
             }
         }
@@ -350,12 +408,26 @@ impl<P: Priority> ParallelPriorityScheduler<P> {
         Self::default()
     }
 
-    /// Ensures parallel command buffers are initialized for the given thread count.
-    fn ensure_parallel_buffers(&mut self, thread_count: usize) {
-        if self.parallel_buffers.is_none() {
-            // +1 for main thread participation in work-stealing
-            self.parallel_buffers = Some(ParallelCommandBuffers::new(thread_count + 1));
+    /// Ensures parallel command buffers are initialized with enough capacity.
+    /// 
+    /// We need one buffer per system that could run (not per thread), since
+    /// each system claims its own buffer regardless of which thread runs it.
+    fn ensure_parallel_buffers(&mut self, min_capacity: usize) {
+        match &self.parallel_buffers {
+            None => {
+                self.parallel_buffers = Some(ParallelCommandBuffers::new(min_capacity));
+            }
+            Some(existing) if existing.capacity() < min_capacity => {
+                // Need to grow - replace with larger pool
+                self.parallel_buffers = Some(ParallelCommandBuffers::new(min_capacity));
+            }
+            _ => {} // Already have enough capacity
         }
+    }
+
+    /// Returns the maximum number of systems that could claim buffers in a single phase.
+    fn max_systems_per_phase(&self) -> usize {
+        self.passes.values().map(|p| p.count()).max().unwrap_or(0)
     }
 }
 
@@ -419,22 +491,21 @@ impl<P: Priority> Scheduler<P> for ParallelPriorityScheduler<P> {
     }
 
     fn run(&mut self, world: &mut World) -> Result<(), SystemParamError> {
-        // Check if task pool exists and get thread count
-        let pool_info = world.get_singleton::<TaskPool>().map(|p| {
-            let count = p.thread_count();
-            let pool = p.clone();
-            (pool, count)
-        });
+        // Check if task pool exists
+        let pool = world.get_singleton::<TaskPool>().cloned();
 
-        // Initialize parallel buffers if we have a pool (do this once, outside the loop)
-        if let Some((_, thread_count)) = &pool_info {
-            self.ensure_parallel_buffers(*thread_count);
+        // Initialize parallel buffers with enough capacity for all systems
+        // We need one buffer per system (not per thread) since each system claims its own
+        if pool.is_some() {
+            let max_systems = self.max_systems_per_phase();
+            // +1 for safety margin (e.g., if systems are added during run)
+            self.ensure_parallel_buffers(max_systems + 1);
         }
 
         // Run all phases in order
         for &phase in P::phases() {
             if let Some(pass) = self.passes.get_mut(&phase) {
-                if let Some((ref pool, _)) = pool_info {
+                if let Some(ref pool) = pool {
                     // Use parallel buffers
                     let buffers = self.parallel_buffers.as_ref().unwrap();
                     
@@ -673,6 +744,224 @@ mod tests {
 
         // Can't remove twice
         assert!(!scheduler.remove(id));
+    }
+
+    // =========================================================================
+    // Complex parallel execution tests
+    // =========================================================================
+
+    #[derive(Component)]
+    struct Health(i32);
+
+    #[derive(Component)]
+    struct Mana(i32);
+
+    #[derive(Component)]
+    struct Stamina(i32);
+
+    #[test]
+    fn systems_with_different_components_batch_together() {
+        // Systems accessing different components should be in the same batch
+        let mut scheduler: ParallelPriorityScheduler<SystemPriority> =
+            ParallelPriorityScheduler::new();
+
+        fn read_position(_q: Query<&Position>) {}
+        fn write_velocity(mut _q: Query<&mut Velocity>) {}
+        fn write_health(mut _q: Query<&mut Health>) {}
+
+        scheduler.register(SystemPriority::Update, read_position);
+        scheduler.register(SystemPriority::Update, write_velocity);
+        scheduler.register(SystemPriority::Update, write_health);
+
+        // Get the pass and check batches
+        let pass = scheduler.passes.get_mut(&SystemPriority::Update).unwrap();
+        pass.compute_batches();
+        
+        let batches = pass.batches.as_ref().unwrap();
+        
+        // All three systems should be in ONE batch (no conflicts)
+        // - read_position: reads Position
+        // - write_velocity: writes Velocity
+        // - write_health: writes Health
+        assert_eq!(batches.len(), 1, "Non-conflicting systems should be in one batch");
+        assert_eq!(batches[0].systems.len(), 3);
+    }
+
+    #[test]
+    fn conflicting_systems_separate_batches() {
+        // Systems with read-write conflict should be in different batches
+        let mut scheduler: ParallelPriorityScheduler<SystemPriority> =
+            ParallelPriorityScheduler::new();
+
+        fn read_position(_q: Query<&Position>) {}
+        fn write_position(mut _q: Query<&mut Position>) {}
+
+        scheduler.register(SystemPriority::Update, read_position);
+        scheduler.register(SystemPriority::Update, write_position);
+
+        let pass = scheduler.passes.get_mut(&SystemPriority::Update).unwrap();
+        pass.compute_batches();
+        
+        let batches = pass.batches.as_ref().unwrap();
+        
+        // Two batches needed: read and write can't run together
+        assert_eq!(batches.len(), 2, "Conflicting systems should be in separate batches");
+    }
+
+    #[test]
+    fn multiple_readers_same_batch() {
+        // Multiple readers of the same component can run together
+        let mut scheduler: ParallelPriorityScheduler<SystemPriority> =
+            ParallelPriorityScheduler::new();
+
+        fn read_position_1(_q: Query<&Position>) {}
+        fn read_position_2(_q: Query<&Position>) {}
+        fn read_position_3(_q: Query<&Position>) {}
+
+        scheduler.register(SystemPriority::Update, read_position_1);
+        scheduler.register(SystemPriority::Update, read_position_2);
+        scheduler.register(SystemPriority::Update, read_position_3);
+
+        let pass = scheduler.passes.get_mut(&SystemPriority::Update).unwrap();
+        pass.compute_batches();
+        
+        let batches = pass.batches.as_ref().unwrap();
+        
+        // All readers should be in ONE batch
+        assert_eq!(batches.len(), 1, "Multiple readers should be in one batch");
+        assert_eq!(batches[0].systems.len(), 3);
+    }
+
+    #[test]
+    fn complex_parallel_execution() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+        use std::sync::Arc;
+
+        // Create counters to track execution
+        let health_counter = Arc::new(AtomicI32::new(0));
+        let mana_counter = Arc::new(AtomicI32::new(0));
+        let stamina_counter = Arc::new(AtomicI32::new(0));
+        let total_counter = Arc::new(AtomicI32::new(0));
+
+        let mut world = World::new();
+        world.insert_singleton(TaskPool::new());
+
+        // Spawn entities with various components
+        for i in 0..100 {
+            match i % 3 {
+                0 => { world.spawn_with(Health(1)); }
+                1 => { world.spawn_with(Mana(1)); }
+                _ => { world.spawn_with(Stamina(1)); }
+            }
+        }
+
+        let mut scheduler: ParallelPriorityScheduler<SystemPriority> =
+            ParallelPriorityScheduler::new();
+
+        // Create systems using closures that capture counters
+        let hc = Arc::clone(&health_counter);
+        let tc1 = Arc::clone(&total_counter);
+        scheduler.register(SystemPriority::Update, move |mut q: Query<&Health>| {
+            for h in q.iter() {
+                hc.fetch_add(h.0, Ordering::Relaxed);
+                tc1.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let mc = Arc::clone(&mana_counter);
+        let tc2 = Arc::clone(&total_counter);
+        scheduler.register(SystemPriority::Update, move |mut q: Query<&Mana>| {
+            for m in q.iter() {
+                mc.fetch_add(m.0, Ordering::Relaxed);
+                tc2.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        let sc = Arc::clone(&stamina_counter);
+        let tc3 = Arc::clone(&total_counter);
+        scheduler.register(SystemPriority::Update, move |mut q: Query<&Stamina>| {
+            for s in q.iter() {
+                sc.fetch_add(s.0, Ordering::Relaxed);
+                tc3.fetch_add(1, Ordering::Relaxed);
+            }
+        });
+
+        // Run the scheduler
+        scheduler.run(&mut world).unwrap();
+
+        // Verify all systems executed
+        // 100 entities: ~33 Health, ~33 Mana, ~34 Stamina
+        let health_sum = health_counter.load(Ordering::Relaxed);
+        let mana_sum = mana_counter.load(Ordering::Relaxed);
+        let stamina_sum = stamina_counter.load(Ordering::Relaxed);
+        let total = total_counter.load(Ordering::Relaxed);
+
+        assert!(health_sum > 0, "Health system should have run");
+        assert!(mana_sum > 0, "Mana system should have run");
+        assert!(stamina_sum > 0, "Stamina system should have run");
+        assert_eq!(total, 100, "Should have processed 100 entities total");
+        assert_eq!(health_sum + mana_sum + stamina_sum, 100);
+    }
+
+    #[test]
+    fn parallel_execution_with_mutations() {
+        let mut world = World::new();
+        world.insert_singleton(TaskPool::new());
+
+        // Spawn entities with different components
+        for _ in 0..50 {
+            world.spawn_with((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 2.0 }));
+        }
+        for _ in 0..50 {
+            world.spawn_with(Health(100));
+        }
+
+        let mut scheduler: ParallelPriorityScheduler<SystemPriority> =
+            ParallelPriorityScheduler::new();
+
+        // System 1: Updates Position based on Velocity
+        fn movement(mut query: Query<(&mut Position, &Velocity)>) {
+            for (pos, vel) in query.iter() {
+                pos.x += vel.x;
+                pos.y += vel.y;
+            }
+        }
+
+        // System 2: Decrements Health (independent of movement)
+        fn damage(mut query: Query<&mut Health>) {
+            for health in query.iter() {
+                health.0 -= 1;
+            }
+        }
+
+        scheduler.register(SystemPriority::Update, movement);
+        scheduler.register(SystemPriority::Update, damage);
+
+        // These should run in the same batch (different components)
+        let pass = scheduler.passes.get_mut(&SystemPriority::Update).unwrap();
+        pass.compute_batches();
+        let batches = pass.batches.as_ref().unwrap();
+        assert_eq!(batches.len(), 1, "movement and damage should batch together");
+
+        // Reset batches for actual execution
+        scheduler.passes.get_mut(&SystemPriority::Update).unwrap().batches = None;
+
+        // Run multiple frames
+        for _ in 0..10 {
+            scheduler.run(&mut world).unwrap();
+        }
+
+        // Verify results
+        let mut pos_query = world.query::<&Position>();
+        for pos in pos_query.iter() {
+            assert_eq!(pos.x, 10.0, "Position.x should be 10 after 10 frames");
+            assert_eq!(pos.y, 20.0, "Position.y should be 20 after 10 frames");
+        }
+
+        let mut health_query = world.query::<&Health>();
+        for health in health_query.iter() {
+            assert_eq!(health.0, 90, "Health should be 90 after 10 damage ticks");
+        }
     }
 }
 

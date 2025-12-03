@@ -6,11 +6,12 @@ use std::marker::PhantomData;
 
 use crate::{
     commands::CommandQueue,
+    parallel_world::ParamAccess,
     system_param::{SystemParam, SystemParamError, SystemParamItem},
     world::{UnsafeWorldCell, World},
 };
 
-pub trait System: 'static {
+pub trait System: Send + 'static {
     /// Runs the system with a shared command queue for deferred mutations.
     ///
     /// This is the primary method used by sequential schedulers.
@@ -55,6 +56,13 @@ pub trait System: 'static {
     /// Returns true if this system's first parameter is an EventReader.
     fn is_event_reader(&self) -> bool {
         self.event_type_id().is_some()
+    }
+
+    /// Returns the access pattern for this system.
+    ///
+    /// Used by parallel schedulers to determine which systems can run concurrently.
+    fn access(&self) -> ParamAccess {
+        ParamAccess::none()
     }
 }
 
@@ -170,10 +178,12 @@ where
     }
 }
 
-impl<Marker: 'static, F: SystemParamFunction<Marker>> System for FunctionSystem<F, Marker>
+impl<Marker: Send + 'static, F: SystemParamFunction<Marker> + Send> System for FunctionSystem<F, Marker>
 where
     F::Param: FirstParamEventType,
+    <F::Param as SystemParam>::State: Send,
 {
+    #[inline]
     fn run_with_commands(
         &mut self,
         world: &mut World,
@@ -188,6 +198,10 @@ where
     fn event_type_id(&self) -> Option<TypeId> {
         <F::Param as FirstParamEventType>::first_event_type_id()
     }
+
+    fn access(&self) -> ParamAccess {
+        <F::Param as SystemParam>::access()
+    }
 }
 
 pub trait IntoSystem<Marker>: Sized {
@@ -195,10 +209,11 @@ pub trait IntoSystem<Marker>: Sized {
     fn into_system(self) -> Self::System;
 }
 
-impl<F, Marker: 'static> IntoSystem<Marker> for F
+impl<F, Marker: Send + 'static> IntoSystem<Marker> for F
 where
-    F: SystemParamFunction<Marker>,
+    F: SystemParamFunction<Marker> + Send,
     F::Param: FirstParamEventType,
+    <F::Param as SystemParam>::State: Send,
 {
     type System = FunctionSystem<F, Marker>;
     fn into_system(self) -> Self::System {

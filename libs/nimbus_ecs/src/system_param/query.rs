@@ -61,6 +61,26 @@ pub struct QueryState {
     last_archetype_count: usize,
 }
 
+/// Storage for archetype indices - either borrowed from cache or owned.
+enum ArchetypeIndices {
+    /// Borrowed from QueryState cache (no allocation in hot path)
+    Borrowed(*const [usize]),
+    /// Owned for direct world.query() calls
+    Owned(Vec<usize>),
+}
+
+impl ArchetypeIndices {
+    #[inline]
+    fn as_slice(&self) -> &[usize] {
+        match self {
+            // SAFETY: Borrowed pointer is valid for the duration of the query
+            // because it points to QueryState which outlives the Query
+            ArchetypeIndices::Borrowed(ptr) => unsafe { &**ptr },
+            ArchetypeIndices::Owned(vec) => vec.as_slice(),
+        }
+    }
+}
+
 /// A dynamic query that can iterate over complex component sets with optional filters.
 /// 
 /// Queries find matching archetypes and iterate directly over their dense columns,
@@ -72,7 +92,7 @@ where
     F: QueryFilter,
 {
     /// Archetype indices matching this query (borrowed from cache or owned)
-    matching_archetypes: Vec<usize>,
+    matching_archetypes: ArchetypeIndices,
     /// Pointer to world for accessing archetypes
     world: UnsafeWorldCell<'w>,
     _marker: PhantomData<(P, F)>,
@@ -112,10 +132,11 @@ where
             state.last_archetype_count = current_count;
         }
         
-        // Clone the cached list - this is cheap for typical query counts
-        // and avoids lifetime complexity
+        // Use pointer to cached slice - avoids allocation in hot path
         Self {
-            matching_archetypes: state.matching_archetypes.clone(),
+            matching_archetypes: ArchetypeIndices::Borrowed(
+                state.matching_archetypes.as_slice() as *const [usize]
+            ),
             world: cell,
             _marker: PhantomData,
         }
@@ -140,16 +161,17 @@ where
         });
 
         Self {
-            matching_archetypes,
+            matching_archetypes: ArchetypeIndices::Owned(matching_archetypes),
             world: cell,
             _marker: PhantomData,
         }
     }
 
     /// Returns an iterator over each entity that satisfies the query.
+    #[inline]
     pub fn iter(&mut self) -> QueryIter<'_, 'w, P, F> {
         QueryIter {
-            archetypes: self.matching_archetypes.iter(),
+            archetypes: self.matching_archetypes.as_slice().iter(),
             world: self.world,
             column_state: None,
             current_row: 0,
@@ -187,6 +209,7 @@ where
 {
     type Item = P::Item<'state>;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             // If we have cached column state, iterate directly (fast path - no HashMap lookups!)
@@ -228,6 +251,16 @@ pub trait QueryParam: sealed::Sealed {
 
     /// Returns the TypeIds of components required by this query parameter.
     fn required_types() -> Vec<TypeId>;
+
+    /// Returns the TypeIds of components read immutably.
+    fn read_types() -> Vec<TypeId> {
+        Vec::new()
+    }
+
+    /// Returns the TypeIds of components written mutably.
+    fn write_types() -> Vec<TypeId> {
+        Vec::new()
+    }
     
     /// Initializes column state for fast iteration over an archetype.
     /// Returns None if the archetype doesn't have the required columns.
@@ -268,11 +301,17 @@ impl<T: Component> QueryParam for &T {
         const { assert!(size_of::<T>() > 0, "Cannot query zero-sized types. Use With<T> filter instead.") };
         vec![TypeId::of::<T>()]
     }
+
+    fn read_types() -> Vec<TypeId> {
+        vec![TypeId::of::<T>()]
+    }
     
+    #[inline]
     fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
         archetype.column::<T>().map(|col| col.as_slice())
     }
     
+    #[inline(always)]
     fn fetch_from_columns<'a>(state: &mut Self::ColumnState<'a>, row: usize) -> Self::Item<'a> {
         &state[row]
     }
@@ -292,7 +331,12 @@ impl<T: Component> QueryParam for &mut T {
         const { assert!(size_of::<T>() > 0, "Cannot query zero-sized types. Use With<T> filter instead.") };
         vec![TypeId::of::<T>()]
     }
+
+    fn write_types() -> Vec<TypeId> {
+        vec![TypeId::of::<T>()]
+    }
     
+    #[inline]
     fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
         // Safety: caller ensures exclusive access through the query system
         let archetype = archetype as *const Archetype as *mut Archetype;
@@ -301,6 +345,7 @@ impl<T: Component> QueryParam for &mut T {
         }
     }
     
+    #[inline(always)]
     fn fetch_from_columns<'a>(state: &mut Self::ColumnState<'a>, row: usize) -> Self::Item<'a> {
         unsafe { &mut *state.add(row) }
     }
@@ -421,6 +466,18 @@ macro_rules! impl_query_param_tuple {
                 $(types.extend($name::required_types());)+
                 types
             }
+
+            fn read_types() -> Vec<TypeId> {
+                let mut types = Vec::new();
+                $(types.extend($name::read_types());)+
+                types
+            }
+
+            fn write_types() -> Vec<TypeId> {
+                let mut types = Vec::new();
+                $(types.extend($name::write_types());)+
+                types
+            }
             
             #[allow(non_snake_case)]
             fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
@@ -465,11 +522,20 @@ impl<P: QueryParam + 'static, F: QueryFilter + 'static> SystemParam for Query<'_
     type State = QueryState;
     type Item<'w, 's> = Query<'w, P, F>;
 
+    #[inline]
     fn from_world_with_state<'w, 's>(
         world: UnsafeWorldCell<'w>,
         state: &'s mut Self::State,
     ) -> Result<Self::Item<'w, 's>, SystemParamError> {
         Ok(Query::new_with_state(world, state))
+    }
+
+    fn access() -> crate::parallel_world::ParamAccess {
+        crate::parallel_world::ParamAccess {
+            reads: P::read_types(),
+            writes: P::write_types(),
+            exclusive: false,
+        }
     }
 }
 
