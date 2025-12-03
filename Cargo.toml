@@ -1,0 +1,9 @@
+[workspace]
+resolver = "3"
+members = [
+    "libs/nimbus_math",
+    "libs/nimbus_engine",
+    "libs/nimbus_ecs",
+    "libs/nimbus_macro_ecs",
+    "examples/basic"
+]

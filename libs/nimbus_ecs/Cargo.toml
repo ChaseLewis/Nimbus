@@ -1,0 +1,27 @@
+[package]
+name = "nimbus_ecs"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+nimbus_macro_ecs = { path = "../nimbus_macro_ecs" }
+hashbrown = "0.14"
+rayon = "1.10"
+crossbeam-channel = "0.5"
+num_cpus = "1.16"
+
+[dev-dependencies]
+criterion = "0.5"
+bevy_ecs = "0.15"
+
+[[bench]]
+name = "archetype_key"
+harness = false
+
+[[bench]]
+name = "ecs_comparison"
+harness = false
+
+[[bench]]
+name = "archetype_scale"
+harness = false
