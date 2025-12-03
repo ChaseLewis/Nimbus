@@ -3,10 +3,12 @@
 mod entity_api;
 mod query;
 mod single;
+mod tasks;
 
 pub use entity_api::{EntityAPI, EntityRef};
 pub use query::{Query, QueryFilter, QueryIter, QueryParam, With, Without};
 pub use single::{Single, SingleMut};
+pub use tasks::Tasks;
 
 use std::any::{type_name, TypeId};
 use std::fmt;

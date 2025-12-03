@@ -12,11 +12,32 @@ use crate::{
 
 pub trait System: 'static {
     /// Runs the system with a shared command queue for deferred mutations.
+    ///
+    /// This is the primary method used by sequential schedulers.
     fn run_with_commands(
         &mut self,
         world: &mut World,
         commands: &RefCell<CommandQueue>,
     ) -> Result<(), SystemParamError>;
+
+    /// Runs the system with an exclusive command buffer.
+    ///
+    /// This is used by parallel schedulers where each system gets its own
+    /// command buffer from a [`ParallelCommandBuffers`](crate::ParallelCommandBuffers) pool.
+    ///
+    /// The buffer is wrapped in a temporary RefCell for the duration of the call.
+    fn run_with_buffer(
+        &mut self,
+        world: &mut World,
+        buffer: &mut CommandQueue,
+    ) -> Result<(), SystemParamError> {
+        // Temporarily wrap in RefCell for UnsafeWorldCell compatibility
+        // This is safe because we have exclusive access to the buffer
+        let cell = RefCell::new(std::mem::take(buffer));
+        let result = self.run_with_commands(world, &cell);
+        *buffer = cell.into_inner();
+        result
+    }
 
     /// Runs the system without a command queue (creates a temporary one and applies immediately).
     fn run(&mut self, world: &mut World) -> Result<(), SystemParamError> {

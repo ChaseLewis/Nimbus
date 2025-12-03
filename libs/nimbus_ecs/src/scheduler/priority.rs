@@ -21,24 +21,67 @@ use crate::{
     world::World,
 };
 
-use super::{Priority, Scheduler};
+use super::{Priority, Scheduler, SystemId};
+
+/// A registered system with its metadata.
+struct RegisteredSystem {
+    id: SystemId,
+    system: Box<dyn System>,
+    enabled: bool,
+}
 
 /// A priority pass containing both event handlers and regular systems.
 #[derive(Default)]
 struct PriorityPass {
     /// Systems that read events (EventReader as first param).
-    events: Vec<Box<dyn System>>,
+    events: Vec<RegisteredSystem>,
     /// Regular systems.
-    systems: Vec<Box<dyn System>>,
+    systems: Vec<RegisteredSystem>,
 }
 
 impl PriorityPass {
-    fn add(&mut self, system: Box<dyn System>) {
-        if system.is_event_reader() {
-            self.events.push(system);
+    fn add(&mut self, id: SystemId, system: Box<dyn System>) {
+        let registered = RegisteredSystem {
+            id,
+            system,
+            enabled: true,
+        };
+        if registered.system.is_event_reader() {
+            self.events.push(registered);
         } else {
-            self.systems.push(system);
+            self.systems.push(registered);
         }
+    }
+
+    fn remove(&mut self, id: SystemId) -> bool {
+        if let Some(pos) = self.events.iter().position(|s| s.id == id) {
+            self.events.remove(pos);
+            return true;
+        }
+        if let Some(pos) = self.systems.iter().position(|s| s.id == id) {
+            self.systems.remove(pos);
+            return true;
+        }
+        false
+    }
+
+    fn set_enabled(&mut self, id: SystemId, enabled: bool) -> bool {
+        for sys in self.events.iter_mut().chain(self.systems.iter_mut()) {
+            if sys.id == id {
+                sys.enabled = enabled;
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_enabled(&self, id: SystemId) -> Option<bool> {
+        for sys in self.events.iter().chain(self.systems.iter()) {
+            if sys.id == id {
+                return Some(sys.enabled);
+            }
+        }
+        None
     }
 
     fn count(&self) -> usize {
@@ -50,19 +93,23 @@ impl PriorityPass {
         self.systems.clear();
     }
 
-    /// Runs event handlers then regular systems.
+    /// Runs enabled event handlers then enabled regular systems.
     fn run(
         &mut self,
         world: &mut World,
         commands: &RefCell<CommandQueue>,
     ) -> Result<(), SystemParamError> {
-        // Run event handlers first
-        for system in &mut self.events {
-            system.run_with_commands(world, commands)?;
+        // Run enabled event handlers first
+        for sys in &mut self.events {
+            if sys.enabled {
+                sys.system.run_with_commands(world, commands)?;
+            }
         }
-        // Then regular systems
-        for system in &mut self.systems {
-            system.run_with_commands(world, commands)?;
+        // Then enabled regular systems
+        for sys in &mut self.systems {
+            if sys.enabled {
+                sys.system.run_with_commands(world, commands)?;
+            }
         }
         Ok(())
     }
@@ -120,11 +167,40 @@ impl<P: Priority> Default for PriorityScheduler<P> {
 }
 
 impl<P: Priority> Scheduler<P> for PriorityScheduler<P> {
-    fn add_system(&mut self, priority: P, system: Box<dyn System>) {
+    fn add_system(&mut self, priority: P, system: Box<dyn System>) -> SystemId {
+        let id = SystemId::new();
         self.passes
             .entry(priority)
             .or_default()
-            .add(system);
+            .add(id, system);
+        id
+    }
+
+    fn remove(&mut self, id: SystemId) -> bool {
+        for pass in self.passes.values_mut() {
+            if pass.remove(id) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn set_enabled(&mut self, id: SystemId, enabled: bool) -> bool {
+        for pass in self.passes.values_mut() {
+            if pass.set_enabled(id, enabled) {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn is_enabled(&self, id: SystemId) -> Option<bool> {
+        for pass in self.passes.values() {
+            if let Some(enabled) = pass.is_enabled(id) {
+                return Some(enabled);
+            }
+        }
+        None
     }
 
     fn system_count(&self) -> usize {

@@ -18,12 +18,12 @@ pub mod world;
 pub use app::{App, GenericApp, WorldInit};
 pub use archetype::ArchetypeKey;
 pub use bundle::Bundle;
-pub use commands::Commands;
+pub use commands::{Commands, ParallelCommandBuffers};
 pub use entity::Entity;
 pub use events::{EventReader, EventWriter};
 pub use plugin::Plugin;
-pub use scheduler::{Priority, Scheduler, SystemPriority};
-pub use system_param::{EntityAPI, EntityRef, Query, QueryFilter, QueryIter, Single, SingleMut, SystemParamError, With, Without};
+pub use scheduler::{Priority, Scheduler, SystemId, SystemPriority};
+pub use system_param::{EntityAPI, EntityRef, Query, QueryFilter, QueryIter, Single, SingleMut, SystemParamError, Tasks, With, Without};
 pub use systems::{IntoSystem, System};
 pub use world::{World, WorldError};
 

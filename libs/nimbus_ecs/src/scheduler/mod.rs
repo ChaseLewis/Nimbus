@@ -1,7 +1,26 @@
 //! System scheduling and execution ordering.
 //!
-//! This module provides a generic scheduler that can work with any priority
-//! enum defined by the application.
+//! This module provides schedulers for organizing and executing systems.
+//!
+//! # Schedulers
+//!
+//! - [`PriorityScheduler`] - Sequential execution by priority phase
+//! - [`ParallelPriorityScheduler`] - Parallel execution of non-conflicting systems
+//!
+//! # System Management
+//!
+//! Systems can be added, removed, enabled, and disabled at runtime:
+//!
+//! ```ignore
+//! let physics_id = app.register_system(Update, physics_system);
+//! let debug_id = app.register_system(Update, debug_overlay);
+//!
+//! // Disable debug overlay in release builds
+//! app.set_system_enabled(debug_id, false);
+//!
+//! // Remove physics entirely
+//! app.remove_system(physics_id);
+//! ```
 //!
 //! # Custom Priority Example
 //!
@@ -30,11 +49,44 @@
 //! }
 //! ```
 
+mod parallel;
 mod priority;
 
+pub use parallel::{ParallelPriorityScheduler, SystemAccess};
 pub use priority::PriorityScheduler;
 
-use crate::{system_param::SystemParamError, systems::System, world::World};
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use crate::{system_param::SystemParamError, systems::{IntoSystem, System}, world::World};
+
+// Global counter for unique system IDs
+static NEXT_SYSTEM_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Unique identifier for a registered system.
+///
+/// Returned when registering a system, used to remove or enable/disable it later.
+///
+/// # Example
+///
+/// ```ignore
+/// let id = scheduler.register(Update, my_system);
+/// scheduler.set_enabled(id, false);  // Disable
+/// scheduler.remove(id);               // Remove entirely
+/// ```
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct SystemId(u64);
+
+impl SystemId {
+    /// Creates a new unique SystemId.
+    pub(crate) fn new() -> Self {
+        Self(NEXT_SYSTEM_ID.fetch_add(1, Ordering::Relaxed))
+    }
+
+    /// Returns the raw numeric ID (for debugging).
+    pub fn raw(&self) -> u64 {
+        self.0
+    }
+}
 
 /// Trait for priority enums that define system execution phases.
 ///
@@ -109,15 +161,52 @@ impl Priority for SystemPriority {
 
 /// Trait for system schedulers that organize and execute systems.
 pub trait Scheduler<P: Priority>: Default {
-    /// Adds a system to the scheduler with the specified priority.
-    fn add_system(&mut self, priority: P, system: Box<dyn System>);
+    /// Adds a boxed system to the scheduler with the specified priority.
+    ///
+    /// Returns a [`SystemId`] that can be used to remove or enable/disable the system.
+    ///
+    /// Prefer using [`register`](Self::register) for a more ergonomic API.
+    fn add_system(&mut self, priority: P, system: Box<dyn System>) -> SystemId;
 
-    /// Returns the total number of systems in the scheduler.
+    /// Registers a system to run at the given priority.
+    ///
+    /// Returns a [`SystemId`] that can be used to remove or enable/disable the system.
+    ///
+    /// This is the ergonomic way to add systems - just pass a function:
+    ///
+    /// ```ignore
+    /// let id = scheduler.register(SystemPriority::Update, my_system);
+    /// scheduler.set_enabled(id, false);
+    /// ```
+    fn register<M>(&mut self, priority: P, system: impl IntoSystem<M>) -> SystemId {
+        self.add_system(priority, Box::new(system.into_system()))
+    }
+
+    /// Removes a system from the scheduler.
+    ///
+    /// Returns `true` if the system was found and removed, `false` otherwise.
+    fn remove(&mut self, id: SystemId) -> bool;
+
+    /// Enables or disables a system.
+    ///
+    /// Disabled systems remain registered but are skipped during execution.
+    /// This is more efficient than removing and re-adding systems that are
+    /// frequently toggled.
+    ///
+    /// Returns `true` if the system was found, `false` otherwise.
+    fn set_enabled(&mut self, id: SystemId, enabled: bool) -> bool;
+
+    /// Returns whether a system is enabled.
+    ///
+    /// Returns `None` if the system ID is not found.
+    fn is_enabled(&self, id: SystemId) -> Option<bool>;
+
+    /// Returns the total number of systems in the scheduler (including disabled).
     fn system_count(&self) -> usize;
 
     /// Clears all systems from the scheduler.
     fn clear(&mut self);
 
-    /// Runs all systems in the scheduler's defined order.
+    /// Runs all enabled systems in the scheduler's defined order.
     fn run(&mut self, world: &mut World) -> Result<(), SystemParamError>;
 }

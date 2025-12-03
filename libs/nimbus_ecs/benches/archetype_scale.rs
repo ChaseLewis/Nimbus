@@ -170,10 +170,7 @@ mod nimbus {
     
     /// Wrap setup_world in an App for scheduler benchmarks
     pub fn setup_app() -> App {
-        App {
-            world: setup_world(),
-            scheduler: nimbus_ecs::scheduler::PriorityScheduler::new(),
-        }
+        App::from_parts(setup_world(), nimbus_ecs::scheduler::PriorityScheduler::new())
     }
 }
 

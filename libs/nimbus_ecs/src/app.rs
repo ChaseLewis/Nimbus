@@ -10,7 +10,7 @@ use crate::{
     bundle::Bundle,
     entity::Entity,
     plugin::PluginExt,
-    scheduler::{Priority, PriorityScheduler, Scheduler, SystemPriority},
+    scheduler::{Priority, PriorityScheduler, Scheduler, SystemId, SystemPriority},
     systems::IntoSystem,
     world::World,
     SystemParamError,
@@ -96,6 +96,28 @@ impl<P: Priority> GenericApp<P> {
         Self::default()
     }
 
+    /// Creates an App from existing World and Scheduler.
+    ///
+    /// Useful for benchmarks or when migrating from manual world management.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nimbus_ecs::{App, World};
+    /// use nimbus_ecs::scheduler::PriorityScheduler;
+    ///
+    /// let world = World::new();
+    /// let scheduler = PriorityScheduler::new();
+    /// let app = App::from_parts(world, scheduler);
+    /// ```
+    pub fn from_parts(world: World, scheduler: PriorityScheduler<P>) -> Self {
+        Self {
+            world,
+            scheduler,
+            _marker: PhantomData,
+        }
+    }
+
     /// Returns an immutable reference to the world.
     #[inline]
     pub fn world(&self) -> &World {
@@ -113,15 +135,46 @@ impl<P: Priority> GenericApp<P> {
 
     /// Registers a system to run at the given priority.
     ///
-    /// Returns `&mut Self` for method chaining.
+    /// Returns a [`SystemId`] that can be used to remove or enable/disable the system.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// let physics_id = app.register_system(Update, physics_system);
+    /// app.set_system_enabled(physics_id, false); // Disable for pause menu
+    /// ```
     pub fn register_system<M, S: IntoSystem<M>>(
         &mut self,
         priority: P,
         system: S,
-    ) -> &mut Self {
+    ) -> SystemId {
         self.scheduler
-            .add_system(priority, Box::new(system.into_system()));
-        self
+            .add_system(priority, Box::new(system.into_system()))
+    }
+
+    /// Removes a system from the scheduler.
+    ///
+    /// Returns `true` if the system was found and removed, `false` otherwise.
+    pub fn remove_system(&mut self, id: SystemId) -> bool {
+        self.scheduler.remove(id)
+    }
+
+    /// Enables or disables a system.
+    ///
+    /// Disabled systems remain registered but are skipped during execution.
+    /// This is more efficient than removing and re-adding systems that are
+    /// frequently toggled (e.g., debug overlays, pause menu).
+    ///
+    /// Returns `true` if the system was found, `false` otherwise.
+    pub fn set_system_enabled(&mut self, id: SystemId, enabled: bool) -> bool {
+        self.scheduler.set_enabled(id, enabled)
+    }
+
+    /// Returns whether a system is enabled.
+    ///
+    /// Returns `None` if the system ID is not found.
+    pub fn is_system_enabled(&self, id: SystemId) -> Option<bool> {
+        self.scheduler.is_enabled(id)
     }
 
     /// Adds a plugin to configure the app.

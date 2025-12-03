@@ -6,9 +6,16 @@
 //!
 //! This ensures iteration safety - you can't invalidate a query
 //! while iterating over it.
+//!
+//! # Parallel Execution
+//!
+//! For parallel system execution, use [`ParallelCommandBuffers`] which
+//! provides a pool of command queues that systems can claim atomically.
 
+mod parallel;
 mod queue;
 
+pub use parallel::ParallelCommandBuffers;
 pub use queue::{Command, CommandKind, CommandQueue};
 
 use std::cell::RefCell;
