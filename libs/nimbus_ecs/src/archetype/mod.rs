@@ -12,5 +12,5 @@ pub use archetypes::Archetypes;
 pub use key::ArchetypeKey;
 
 // Crate-internal
-pub(crate) use archetype::{Archetype, Column};
+pub(crate) use archetype::{Archetype, Column, ColumnData};
 pub(crate) use archetypes::SendArchetypesPtr;

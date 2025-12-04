@@ -10,6 +10,7 @@ pub mod events;
 mod parallel_world;
 pub mod plugin;
 pub mod scheduler;
+pub mod serialization;
 mod system_param;
 mod systems;
 pub mod task;
@@ -25,11 +26,20 @@ pub use events::{EventReader, EventWriter};
 pub use parallel_world::{ParallelWorldCell, ParamAccess};
 pub use plugin::Plugin;
 pub use scheduler::{Priority, Scheduler, SystemId, SystemPriority};
+pub use serialization::{
+    ComponentRegistration, ComponentRegistry,
+    serialize, deserialize,
+};
 pub use system_param::{EntityAPI, EntityRef, Query, QueryFilter, QueryIter, Single, SingleMut, SystemParamError, Tasks, With, Without};
 pub use systems::{IntoSystem, System};
 pub use world::{World, WorldError};
 
-// Export the Component trait and derive macro
-// Note: The derive macro must come LAST so it doesn't shadow the trait
+// Export Component trait
 pub use component::Component;
+
+// Export macros: both attribute macro and legacy derive
+pub use nimbus_macro_ecs::component;
 pub use nimbus_macro_ecs::Component;
+
+// Re-export inventory for macro use
+pub use inventory;
