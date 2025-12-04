@@ -34,8 +34,8 @@ pub use system_param::{EntityAPI, EntityRef, Query, QueryFilter, QueryIter, Sing
 pub use systems::{IntoSystem, System};
 pub use world::{World, WorldError};
 
-// Export Component trait
-pub use component::Component;
+// Export Component trait, ComponentId, and hash functions for macro use
+pub use component::{Component, ComponentId, const_fnv1a_64, const_fnv1a_64_str};
 
 // Export macros: both attribute macro and legacy derive
 pub use nimbus_macro_ecs::component;

@@ -269,11 +269,12 @@ impl<P: Priority> WorldInit for GenericApp<P> {
 ///
 /// # Example
 /// ```
-/// use nimbus_ecs::{App, Component, Query, SystemPriority, WorldInit};
+/// use nimbus_ecs::{App, Component, ComponentId, Query, SystemPriority, WorldInit};
 ///
-/// // #[derive(Component)]  -- use this in your code
 /// struct Health(i32);
-/// # impl nimbus_ecs::component::Component for Health {}
+/// impl Component for Health {
+///     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+/// }
 ///
 /// fn damage_system(mut query: Query<&mut Health>) {
 ///     for health in query.iter() {

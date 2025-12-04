@@ -38,17 +38,20 @@ use crate::world::UnsafeWorldCell;
 ///
 /// # Example
 /// ```
-/// use nimbus_ecs::{Commands, Query, Entity, Component};
+/// use nimbus_ecs::{Commands, Query, Entity, Component, ComponentId};
 ///
-/// // #[derive(Component)]  -- use this in your code
 /// struct Position { x: f32, y: f32 }
-/// # impl Component for Position {}
-/// // #[derive(Component)]
+/// impl Component for Position {
+///     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+/// }
 /// struct Velocity { x: f32, y: f32 }
-/// # impl Component for Velocity {}
-/// // #[derive(Component)]
+/// impl Component for Velocity {
+///     const COMPONENT_ID: ComponentId = ComponentId::new(0x5678);
+/// }
 /// struct Health { value: i32 }
-/// # impl Component for Health {}
+/// impl Component for Health {
+///     const COMPONENT_ID: ComponentId = ComponentId::new(0x9ABC);
+/// }
 ///
 /// fn spawn_system(commands: Commands) {
 ///     // Queue a spawn - doesn't happen until after this system completes

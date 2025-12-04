@@ -25,12 +25,12 @@
 //! }
 //! ```
 
-use std::any::TypeId;
 use std::sync::LazyLock;
 use hashbrown::HashMap;
 use std::io::{Read, Write};
 use crate::archetype::{Column, ColumnData};
-use crate::util::TypeHashMap;
+use crate::component::{Component, ComponentId};
+use crate::util::ComponentIdHashMap;
 
 /// Error type for serialization operations.
 #[derive(Debug)]
@@ -75,8 +75,8 @@ type SerializeFn = unsafe fn(src: *const u8, writer: &mut dyn Write) -> Result<(
 /// Function type for deserialization into raw pointer.
 /// Safety: dst must be a valid, properly aligned pointer with enough space for the type.
 type DeserializeFn = unsafe fn(reader: &mut dyn Read, dst: *mut u8) -> Result<(), Error>;
-/// Function type for getting type_id
-type TypeIdFn = fn() -> TypeId;
+/// Function type for getting component_id
+type ComponentIdFn = fn() -> ComponentId;
 /// Function type for creating an empty column
 type ColumnFactoryFn = fn() -> Box<dyn Column>;
 /// Function type for pushing raw bytes to a column
@@ -112,8 +112,8 @@ pub struct ComponentRegistration {
     size: usize,
     /// Alignment of the component type
     align: usize,
-    /// Function to get the runtime type identifier
-    type_id_fn: TypeIdFn,
+    /// Function to get the component ID
+    component_id_fn: ComponentIdFn,
     /// Serialization function (reads from raw pointer)
     serialize_fn: SerializeFn,
     /// Deserialization function (writes to raw pointer)
@@ -132,13 +132,13 @@ impl ComponentRegistration {
     /// is not yet const-stable.
     pub const fn new<T>(type_name: &'static str) -> Self
     where
-        T: serde::Serialize + for<'de> serde::Deserialize<'de> + Send + Sync + 'static,
+        T: Component + serde::Serialize + for<'de> serde::Deserialize<'de>,
     {
         ComponentRegistration {
             type_name,
             size: std::mem::size_of::<T>(),
             align: std::mem::align_of::<T>(),
-            type_id_fn: || TypeId::of::<T>(),
+            component_id_fn: || T::COMPONENT_ID,
             serialize_fn: |src, writer| {
                 // Safety: caller guarantees src points to a valid T
                 unsafe { serialize_from_ptr::<T>(src, writer) }
@@ -155,10 +155,10 @@ impl ComponentRegistration {
         }
     }
     
-    /// Returns the type ID for this component.
+    /// Returns the ComponentId for this component.
     #[inline]
-    pub fn type_id(&self) -> TypeId {
-        (self.type_id_fn)()
+    pub fn component_id(&self) -> ComponentId {
+        (self.component_id_fn)()
     }
     
     /// Returns the size of this component type in bytes.
@@ -294,8 +294,13 @@ static GLOBAL_REGISTRY: LazyLock<ComponentRegistry> = LazyLock::new(ComponentReg
 /// ```ignore
 /// let reg = ComponentRegistry::global().get::<Position>();
 /// ```
+///
+/// # Collision Detection
+///
+/// On initialization, the registry checks for duplicate `ComponentId` values.
+/// If a collision is detected, it panics with a helpful error message.
 pub struct ComponentRegistry {
-    by_type_id: TypeHashMap<&'static ComponentRegistration>,
+    by_id: ComponentIdHashMap<&'static ComponentRegistration>,
     by_name: HashMap<String, &'static ComponentRegistration>,
 }
 
@@ -304,6 +309,10 @@ impl ComponentRegistry {
     ///
     /// This is lazily initialized on first access and discovers all
     /// `#[component(serializable)]` types automatically.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a `ComponentId` collision is detected (two types with the same ID).
     ///
     /// # Example
     ///
@@ -323,21 +332,51 @@ impl ComponentRegistry {
     /// Creates a new empty registry.
     pub fn new() -> Self {
         Self {
-            by_type_id: HashMap::default(),
+            by_id: ComponentIdHashMap::default(),
             by_name: HashMap::new(),
         }
     }
 
     /// Builds registry from all components registered via inventory.
     /// 
-    /// Note: Prefer using [`ComponentRegistry::global()`] for the cached static instance.
-    /// This method rebuilds the registry each time it's called.
+    /// # Panics
+    ///
+    /// Panics if a `ComponentId` collision is detected. This indicates either:
+    /// - A hash collision (extremely rare with 64-bit FNV-1a)
+    /// - Two types with the same explicit ID
+    ///
+    /// The panic message includes both type names to help resolve the collision
+    /// by adding an explicit `#[component(id = ...)]` to one of them.
     pub fn from_inventory() -> Self {
         let mut registry = Self::new();
+        
         for entry in inventory::iter::<ComponentRegistration> {
-            registry.by_type_id.insert(entry.type_id(), entry);
+            let id = entry.component_id();
+            
+            // Check for collision
+            if let Some(existing) = registry.by_id.get(&id) {
+                // Generate a suggested alternative ID by XORing with a constant
+                let suggested = id.raw() ^ 0xDEADBEEFCAFEBABE;
+                
+                panic!(
+                    "ComponentId collision detected!\n\
+                     Type '{}' and '{}' have the same ComponentId: {}\n\
+                     \n\
+                     To fix this, add an explicit ID to one of them:\n\
+                     #[component(id = 0x{:016X})]\n\
+                     struct {} {{ ... }}",
+                    existing.type_name,
+                    entry.type_name,
+                    id,
+                    suggested,
+                    entry.type_name
+                );
+            }
+            
+            registry.by_id.insert(id, entry);
             registry.by_name.insert(entry.type_name.to_string(), entry);
         }
+        
         registry
     }
 
@@ -351,13 +390,13 @@ impl ComponentRegistry {
     ///     reg.serialize(&position, &mut buffer)?;
     /// }
     /// ```
-    pub fn get<T: 'static>(&self) -> Option<&'static ComponentRegistration> {
-        self.by_type_id.get(&TypeId::of::<T>()).copied()
+    pub fn get<T: Component>(&self) -> Option<&'static ComponentRegistration> {
+        self.by_id.get(&ComponentId::of::<T>()).copied()
     }
 
-    /// Gets registration by type ID.
-    pub fn get_by_type_id(&self, type_id: TypeId) -> Option<&'static ComponentRegistration> {
-        self.by_type_id.get(&type_id).copied()
+    /// Gets registration by ComponentId.
+    pub fn get_by_id(&self, id: ComponentId) -> Option<&'static ComponentRegistration> {
+        self.by_id.get(&id).copied()
     }
 
     /// Gets registration by type name.
@@ -367,17 +406,17 @@ impl ComponentRegistry {
 
     /// Returns an iterator over all registered components.
     pub fn iter(&self) -> impl Iterator<Item = &'static ComponentRegistration> + '_ {
-        self.by_type_id.values().copied()
+        self.by_id.values().copied()
     }
 
     /// Returns the number of registered components.
     pub fn len(&self) -> usize {
-        self.by_type_id.len()
+        self.by_id.len()
     }
 
     /// Returns true if no components are registered.
     pub fn is_empty(&self) -> bool {
-        self.by_type_id.is_empty()
+        self.by_id.is_empty()
     }
 }
 

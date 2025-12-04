@@ -20,6 +20,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{
     commands::{CommandQueue, ParallelCommandBuffers},
+    component::ComponentId,
     parallel_world::ParallelWorldCell,
     system_param::SystemParamError,
     systems::System,
@@ -35,9 +36,9 @@ use super::{Priority, Scheduler, SystemId};
 #[derive(Clone, Default)]
 pub struct SystemAccess {
     /// Component types this system reads (immutably)
-    pub reads: Vec<std::any::TypeId>,
+    pub reads: Vec<ComponentId>,
     /// Component types this system writes (mutably)
-    pub writes: Vec<std::any::TypeId>,
+    pub writes: Vec<ComponentId>,
     /// Whether this system uses Commands (writes to command queue)
     pub uses_commands: bool,
     /// Whether this system accesses the World exclusively
@@ -600,21 +601,27 @@ mod tests {
     #[test]
     fn access_conflict_detection() {
         use std::any::TypeId;
+        use crate::component::ComponentId;
+        
+        // Helper to create ComponentId from TypeId for test types
+        fn id_of<T: 'static>() -> ComponentId {
+            ComponentId::from_type_id(TypeId::of::<T>())
+        }
 
         // Read-read: no conflict
         let read_a = SystemAccess {
-            reads: vec![TypeId::of::<Position>()],
+            reads: vec![id_of::<Position>()],
             ..Default::default()
         };
         let read_b = SystemAccess {
-            reads: vec![TypeId::of::<Position>()],
+            reads: vec![id_of::<Position>()],
             ..Default::default()
         };
         assert!(!read_a.conflicts_with(&read_b));
 
         // Read-write: conflict
         let write_a = SystemAccess {
-            writes: vec![TypeId::of::<Position>()],
+            writes: vec![id_of::<Position>()],
             ..Default::default()
         };
         assert!(read_a.conflicts_with(&write_a));
@@ -622,14 +629,14 @@ mod tests {
 
         // Write-write: conflict
         let write_b = SystemAccess {
-            writes: vec![TypeId::of::<Position>()],
+            writes: vec![id_of::<Position>()],
             ..Default::default()
         };
         assert!(write_a.conflicts_with(&write_b));
 
         // Different types: no conflict
         let write_vel = SystemAccess {
-            writes: vec![TypeId::of::<Velocity>()],
+            writes: vec![id_of::<Velocity>()],
             ..Default::default()
         };
         assert!(!write_a.conflicts_with(&write_vel));
@@ -647,12 +654,19 @@ mod tests {
 
     #[test]
     fn batch_computation() {
+        use std::any::TypeId;
+        use crate::component::ComponentId;
+        
+        fn id_of<T: 'static>() -> ComponentId {
+            ComponentId::from_type_id(TypeId::of::<T>())
+        }
+        
         // Test that non-conflicting systems end up in the same batch
         let mut pass = ParallelPass::default();
 
         // Two systems with no conflicts (both just read Position)
         let access = SystemAccess {
-            reads: vec![std::any::TypeId::of::<Position>()],
+            reads: vec![id_of::<Position>()],
             exclusive: false,
             ..Default::default()
         };

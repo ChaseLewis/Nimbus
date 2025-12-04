@@ -1,9 +1,10 @@
 //! Archetype - stores entities with identical component signatures.
 
-use std::any::{Any, TypeId};
+use std::any::Any;
 
+use crate::component::{Component, ComponentId};
 use crate::entity::Entity;
-use crate::util::TypeHashMap;
+use crate::util::{TypeHashMap, ComponentIdHashMap};
 use super::ArchetypeKey;
 
 // ============================================================================
@@ -232,14 +233,14 @@ pub(crate) struct Archetype {
     pub(super) key: ArchetypeKey,
     /// Entities in this archetype (dense, indices match column indices)
     entities: Vec<Entity>,
-    /// Component columns indexed by TypeId
-    pub(super) columns: TypeHashMap<Box<dyn Column>>,
+    /// Component columns indexed by ComponentId
+    pub(super) columns: ComponentIdHashMap<Box<dyn Column>>,
 
     // Graph edges for O(1) archetype transitions (computed lazily, cached forever)
-    /// Cache: adding single TypeId T → target archetype index
-    pub(super) add_edges: TypeHashMap<usize>,
-    /// Cache: removing single TypeId T → target archetype index  
-    pub(super) remove_edges: TypeHashMap<usize>,
+    /// Cache: adding single ComponentId → target archetype index
+    pub(super) add_edges: ComponentIdHashMap<usize>,
+    /// Cache: removing single ComponentId → target archetype index  
+    pub(super) remove_edges: ComponentIdHashMap<usize>,
     /// Cache: adding Bundle (by Bundle's TypeId) → target archetype index
     /// This caches entire bundle transitions for O(1) repeated bundle inserts
     pub(super) bundle_add_edges: TypeHashMap<usize>,
@@ -251,9 +252,9 @@ impl Archetype {
         Self {
             key,
             entities: Vec::new(),
-            columns: TypeHashMap::default(),
-            add_edges: TypeHashMap::default(),
-            remove_edges: TypeHashMap::default(),
+            columns: ComponentIdHashMap::default(),
+            add_edges: ComponentIdHashMap::default(),
+            remove_edges: ComponentIdHashMap::default(),
             bundle_add_edges: TypeHashMap::default(),
         }
     }
@@ -289,45 +290,45 @@ impl Archetype {
         self.entities.swap_remove(row);
     }
 
-    /// Ensures a column exists for the given type.
-    pub fn ensure_column<T: 'static>(&mut self) {
-        let type_id = TypeId::of::<T>();
+    /// Ensures a column exists for the given component type.
+    pub fn ensure_column<T: Component>(&mut self) {
+        let component_id = ComponentId::of::<T>();
         self.columns
-            .entry(type_id)
+            .entry(component_id)
             .or_insert_with(|| Box::new(ColumnData::<T>::new()));
     }
 
     /// Gets a reference to a typed column.
     #[inline]
-    pub fn column<T: 'static>(&self) -> Option<&ColumnData<T>> {
+    pub fn column<T: Component>(&self) -> Option<&ColumnData<T>> {
         self.columns
-            .get(&TypeId::of::<T>())
+            .get(&ComponentId::of::<T>())
             .and_then(|col| col.as_any().downcast_ref::<ColumnData<T>>())
     }
 
     /// Gets a mutable reference to a typed column.
     #[inline]
-    pub fn column_mut<T: 'static>(&mut self) -> Option<&mut ColumnData<T>> {
+    pub fn column_mut<T: Component>(&mut self) -> Option<&mut ColumnData<T>> {
         self.columns
-            .get_mut(&TypeId::of::<T>())
+            .get_mut(&ComponentId::of::<T>())
             .and_then(|col| col.as_any_mut().downcast_mut::<ColumnData<T>>())
     }
 
-    /// Gets a type-erased column.
+    /// Gets a type-erased column by ComponentId.
     #[inline]
-    pub fn column_raw(&self, type_id: TypeId) -> Option<&dyn Column> {
-        self.columns.get(&type_id).map(|c| c.as_ref())
+    pub fn column_raw(&self, component_id: ComponentId) -> Option<&dyn Column> {
+        self.columns.get(&component_id).map(|c| c.as_ref())
     }
 
-    /// Gets a mutable type-erased column.
+    /// Gets a mutable type-erased column by ComponentId.
     #[inline]
-    pub fn column_raw_mut(&mut self, type_id: TypeId) -> Option<&mut dyn Column> {
-        self.columns.get_mut(&type_id).map(|c| c.as_mut())
+    pub fn column_raw_mut(&mut self, component_id: ComponentId) -> Option<&mut dyn Column> {
+        self.columns.get_mut(&component_id).map(|c| c.as_mut())
     }
 
-    /// Ensures a column exists for the given type, creating it from a source column if needed.
-    pub fn ensure_column_from(&mut self, type_id: TypeId, source: &dyn Column) {
-        self.columns.entry(type_id).or_insert_with(|| source.create_empty());
+    /// Ensures a column exists for the given ComponentId, creating it from a source column if needed.
+    pub fn ensure_column_from(&mut self, component_id: ComponentId, source: &dyn Column) {
+        self.columns.entry(component_id).or_insert_with(|| source.create_empty());
     }
 
 
@@ -395,14 +396,14 @@ impl Archetype {
 
     /// Pushes a component value to the end of the column.
     /// Used when adding a new entity to the archetype.
-    pub fn push_component<T: 'static>(&mut self, value: T) {
+    pub fn push_component<T: Component>(&mut self, value: T) {
         self.ensure_column::<T>();
         self.column_mut::<T>().unwrap().push(value);
     }
 
     /// Sets a component value at a specific row, dropping the old value.
     /// Used when replacing an existing component on an entity.
-    pub fn set_component<T: 'static>(&mut self, row: usize, value: T) {
+    pub fn set_component<T: Component>(&mut self, row: usize, value: T) {
         self.ensure_column::<T>();
         self.column_mut::<T>().unwrap().set(row, value);
     }
@@ -413,7 +414,7 @@ impl Archetype {
     /// The slot must be uninitialized (e.g., after copy_to from another archetype
     /// that didn't drop, or a freshly extended column).
     #[allow(dead_code)]
-    pub unsafe fn write_component_uninit<T: 'static>(&mut self, row: usize, value: T) {
+    pub unsafe fn write_component_uninit<T: Component>(&mut self, row: usize, value: T) {
         self.ensure_column::<T>();
         // Safety: caller guarantees slot is uninitialized
         unsafe {
@@ -423,13 +424,13 @@ impl Archetype {
 
     /// Gets a component reference by row index.
     #[inline]
-    pub fn get<T: 'static>(&self, row: usize) -> Option<&T> {
+    pub fn get<T: Component>(&self, row: usize) -> Option<&T> {
         self.column::<T>().and_then(|col| col.get(row))
     }
 
     /// Gets a mutable component reference by row index.
     #[inline]
-    pub fn get_mut<T: 'static>(&mut self, row: usize) -> Option<&mut T> {
+    pub fn get_mut<T: Component>(&mut self, row: usize) -> Option<&mut T> {
         self.column_mut::<T>().and_then(|col| col.get_mut(row))
     }
 
@@ -490,7 +491,7 @@ impl Archetype {
     /// Returns column pointers for fast iteration.
     /// Returns (entities_ptr, column_ptr, len)
     #[inline]
-    pub fn column_ptr<T: 'static>(&self) -> Option<(*const T, usize)> {
+    pub fn column_ptr<T: Component>(&self) -> Option<(*const T, usize)> {
         self.column::<T>().map(|col| {
             let slice = col.as_slice();
             (slice.as_ptr(), slice.len())
@@ -499,7 +500,7 @@ impl Archetype {
 
     /// Returns mutable column pointer for fast iteration.
     #[inline]
-    pub fn column_mut_ptr<T: 'static>(&mut self) -> Option<(*mut T, usize)> {
+    pub fn column_mut_ptr<T: Component>(&mut self) -> Option<(*mut T, usize)> {
         self.column_mut::<T>().map(|col| {
             let slice = col.as_mut_slice();
             (slice.as_mut_ptr(), slice.len())

@@ -16,6 +16,7 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::collections::HashMap;
 
 use crate::commands::CommandQueue;
+use crate::component::ComponentId;
 use crate::world::World;
 
 /// Tracks concurrent access to a single resource (component type or singleton).
@@ -251,9 +252,9 @@ impl<T: 'static> Drop for WriteGuard<'_, '_, T> {
 #[derive(Debug, Clone, Default)]
 pub struct ParamAccess {
     /// Component types read immutably
-    pub reads: Vec<TypeId>,
+    pub reads: Vec<ComponentId>,
     /// Component types written mutably
-    pub writes: Vec<TypeId>,
+    pub writes: Vec<ComponentId>,
     /// Whether this param needs exclusive world access
     pub exclusive: bool,
 }
@@ -264,20 +265,20 @@ impl ParamAccess {
         Self::default()
     }
 
-    /// Creates read-only access for a single type.
-    pub fn read<T: 'static>() -> Self {
+    /// Creates read-only access for a single component type.
+    pub fn read<T: crate::Component>() -> Self {
         Self {
-            reads: vec![TypeId::of::<T>()],
+            reads: vec![ComponentId::of::<T>()],
             writes: Vec::new(),
             exclusive: false,
         }
     }
 
-    /// Creates write access for a single type.
-    pub fn write<T: 'static>() -> Self {
+    /// Creates write access for a single component type.
+    pub fn write<T: crate::Component>() -> Self {
         Self {
             reads: Vec::new(),
-            writes: vec![TypeId::of::<T>()],
+            writes: vec![ComponentId::of::<T>()],
             exclusive: false,
         }
     }
@@ -390,18 +391,25 @@ mod tests {
 
     #[test]
     fn param_access_conflict_detection() {
+        use crate::component::ComponentId;
+        
+        // Helper to create ComponentId from TypeId for test types
+        fn id_of<T: 'static>() -> ComponentId {
+            ComponentId::from_type_id(TypeId::of::<T>())
+        }
+        
         struct Position;
         struct Velocity;
         struct Health;
 
         // Read Position, Read Velocity - no conflict
         let a = ParamAccess {
-            reads: vec![TypeId::of::<Position>(), TypeId::of::<Velocity>()],
+            reads: vec![id_of::<Position>(), id_of::<Velocity>()],
             writes: vec![],
             exclusive: false,
         };
         let b = ParamAccess {
-            reads: vec![TypeId::of::<Position>()],
+            reads: vec![id_of::<Position>()],
             writes: vec![],
             exclusive: false,
         };
@@ -409,13 +417,13 @@ mod tests {
 
         // Read Position vs Write Position - conflict!
         let c = ParamAccess {
-            reads: vec![TypeId::of::<Position>()],
+            reads: vec![id_of::<Position>()],
             writes: vec![],
             exclusive: false,
         };
         let d = ParamAccess {
             reads: vec![],
-            writes: vec![TypeId::of::<Position>()],
+            writes: vec![id_of::<Position>()],
             exclusive: false,
         };
         assert!(c.conflicts_with(&d));
@@ -423,11 +431,11 @@ mod tests {
         // Write Health vs Read Position - no conflict
         let e = ParamAccess {
             reads: vec![],
-            writes: vec![TypeId::of::<Health>()],
+            writes: vec![id_of::<Health>()],
             exclusive: false,
         };
         let f = ParamAccess {
-            reads: vec![TypeId::of::<Position>()],
+            reads: vec![id_of::<Position>()],
             writes: vec![],
             exclusive: false,
         };

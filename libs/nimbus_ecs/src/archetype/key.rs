@@ -1,8 +1,8 @@
 //! ArchetypeKey - identifies a unique combination of component types.
 
-use std::any::TypeId;
 use std::hash::{Hash, Hasher};
-use crate::util::TypeHashSet;
+use crate::component::ComponentId;
+use crate::util::ComponentIdHashSet;
 
 // ============================================================================
 // ArchetypeKey
@@ -15,26 +15,26 @@ use crate::util::TypeHashSet;
 /// We could save some cycles here and this is going to be a very hot path structure.
 #[derive(Clone, Default, Debug)]
 pub struct ArchetypeKey {
-    types: TypeHashSet,
+    types: ComponentIdHashSet,
 }
 
 impl ArchetypeKey {
     #[inline]
-    pub fn new(types: Vec<TypeId>) -> Self {
+    pub fn new(types: Vec<ComponentId>) -> Self {
         Self {
             types: types.into_iter().collect(),
         }
     }
 
     #[inline]
-    pub fn from_iter(iter: impl Iterator<Item = TypeId>) -> Self {
+    pub fn from_iter(iter: impl Iterator<Item = ComponentId>) -> Self {
         Self {
             types: iter.collect(),
         }
     }
 
     #[inline]
-    pub fn from_slice(slice: &[TypeId]) -> Self {
+    pub fn from_slice(slice: &[ComponentId]) -> Self {
         Self {
             types: slice.iter().copied().collect(),
         }
@@ -42,7 +42,7 @@ impl ArchetypeKey {
 
     #[inline]
     /// Returns an iterator over the component types in this archetype.
-    pub fn iter(&self) -> impl Iterator<Item = &TypeId> {
+    pub fn iter(&self) -> impl Iterator<Item = &ComponentId> {
         self.types.iter()
     }
 
@@ -58,22 +58,21 @@ impl ArchetypeKey {
         self.types.is_empty()
     }
 
-    #[inline]
     /// Returns true if this archetype contains the given type.
     #[inline]
-    pub fn contains(&self, ty: TypeId) -> bool {
+    pub fn contains(&self, ty: ComponentId) -> bool {
         self.types.contains(&ty)
     }
 
     #[inline]
     /// Returns true if this archetype contains all the given types.
-    pub fn contains_all(&self, types: &[TypeId]) -> bool {
+    pub fn contains_all(&self, types: &[ComponentId]) -> bool {
         types.iter().all(|ty| self.contains(*ty))
     }
 
     /// Creates a new archetype key with an additional type.
     /// Returns None if the type already exists.
-    pub fn with_type(&self, ty: TypeId) -> Option<Self> {
+    pub fn with_type(&self, ty: ComponentId) -> Option<Self> {
         if self.contains(ty) {
             return None;
         }
@@ -85,7 +84,7 @@ impl ArchetypeKey {
     /// Creates a new archetype key with multiple additional types.
     /// Returns None if ALL types already exist (no change needed).
     /// If some types exist and some don't, only the new ones are added.
-    pub fn with_types(&self, tys: &[TypeId]) -> Option<Self> {
+    pub fn with_types(&self, tys: &[ComponentId]) -> Option<Self> {
         let mut types = self.types.clone();
         let mut any_added = false;
         
@@ -104,7 +103,7 @@ impl ArchetypeKey {
 
     /// Creates a new archetype key without the given type.
     /// Returns None if the type doesn't exist.
-    pub fn without_type(&self, ty: TypeId) -> Option<Self> {
+    pub fn without_type(&self, ty: ComponentId) -> Option<Self> {
         if !self.contains(ty) {
             return None;
         }
@@ -114,10 +113,10 @@ impl ArchetypeKey {
     }
 }
 
-// Implement Hash using XOR of all TypeId hashes (commutative, order-independent)
+// Implement Hash using XOR of all ComponentId hashes (commutative, order-independent)
 impl Hash for ArchetypeKey {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        // XOR all TypeId hashes together for order-independent hashing
+        // XOR all ComponentId hashes together for order-independent hashing
         let mut combined: u64 = 0;
         for ty in &self.types {
             let mut hasher = std::collections::hash_map::DefaultHasher::new();
@@ -137,8 +136,8 @@ impl PartialEq for ArchetypeKey {
 impl Eq for ArchetypeKey {}
 
 impl<'a> IntoIterator for &'a ArchetypeKey {
-    type Item = &'a TypeId;
-    type IntoIter = hashbrown::hash_set::Iter<'a, TypeId>;
+    type Item = &'a ComponentId;
+    type IntoIter = hashbrown::hash_set::Iter<'a, ComponentId>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.types.iter()
@@ -148,13 +147,19 @@ impl<'a> IntoIterator for &'a ArchetypeKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::any::TypeId;
+
+    // Helper to create ComponentId from any type (for testing)
+    fn id_of<T: 'static>() -> ComponentId {
+        ComponentId::from_type_id(TypeId::of::<T>())
+    }
 
     #[test]
     fn archetype_key_iteration() {
         let types = vec![
-            TypeId::of::<u32>(),
-            TypeId::of::<String>(),
-            TypeId::of::<f64>(),
+            id_of::<u32>(),
+            id_of::<String>(),
+            id_of::<f64>(),
         ];
         let key = ArchetypeKey::new(types.clone());
 
@@ -165,14 +170,14 @@ mod tests {
         // Test iter()
         let collected: Vec<_> = key.iter().copied().collect();
         assert_eq!(collected.len(), 3);
-        assert!(collected.contains(&TypeId::of::<u32>()));
-        assert!(collected.contains(&TypeId::of::<String>()));
-        assert!(collected.contains(&TypeId::of::<f64>()));
+        assert!(collected.contains(&id_of::<u32>()));
+        assert!(collected.contains(&id_of::<String>()));
+        assert!(collected.contains(&id_of::<f64>()));
 
         // Test IntoIterator for &ArchetypeKey
         let mut count = 0;
-        for type_id in &key {
-            assert!(key.contains(*type_id));
+        for component_id in &key {
+            assert!(key.contains(*component_id));
             count += 1;
         }
         assert_eq!(count, 3);

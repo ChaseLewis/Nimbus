@@ -12,14 +12,16 @@ use super::{SystemParam, SystemParamError};
 ///
 /// # Example
 /// ```
-/// use nimbus_ecs::{Query, Entity, Component, EntityAPI};
+/// use nimbus_ecs::{Query, Entity, Component, ComponentId, EntityAPI};
 ///
-/// // #[derive(Component)]  -- use this in your code
 /// struct Parent { entity: Option<Entity> }
-/// # impl Component for Parent {}
-/// // #[derive(Component)]
+/// impl Component for Parent {
+///     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+/// }
 /// struct Name(String);
-/// # impl Component for Name {}
+/// impl Component for Name {
+///     const COMPONENT_ID: ComponentId = ComponentId::new(0x5678);
+/// }
 ///
 /// fn print_parent_names(
 ///     mut query: Query<(&Parent,)>,
@@ -155,19 +157,20 @@ impl SystemParam for EntityAPI<'_> {
 mod tests {
     use super::*;
     use crate::World;
+    use crate::component;
 
+    #[component]
     #[derive(Debug, PartialEq)]
     struct Position { x: f32, y: f32 }
-    impl crate::component::Component for Position {}
 
+    #[component]
     #[derive(Debug, PartialEq)]
     struct Health { value: i32 }
-    impl crate::component::Component for Health {}
 
+    #[component]
     #[derive(Debug)]
     #[allow(dead_code)]
     struct Target { entity: Option<Entity> }
-    impl crate::component::Component for Target {}
 
     #[test]
     fn entity_api_get_component() {

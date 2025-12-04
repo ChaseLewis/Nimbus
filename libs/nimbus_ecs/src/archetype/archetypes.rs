@@ -3,15 +3,16 @@
 use std::any::TypeId;
 use hashbrown::HashMap;
 use super::{Archetype, ArchetypeKey};
-use crate::util::TypeHashMap;
+use crate::component::ComponentId;
+use crate::util::ComponentIdHashMap;
 
 /// Collection of all archetypes in the world.
 pub struct Archetypes {
     lookup: HashMap<ArchetypeKey, usize>,
     data: Vec<Archetype>,
-    /// Reverse index: TypeId -> archetype indices containing that component.
+    /// Reverse index: ComponentId -> archetype indices containing that component.
     /// Enables O(smallest_set) query matching instead of O(all_archetypes).
-    component_index: TypeHashMap<Vec<usize>>,
+    component_index: ComponentIdHashMap<Vec<usize>>,
 }
 
 /// A Send+Sync wrapper around a pointer to Archetypes.
@@ -50,15 +51,15 @@ impl Archetypes {
         Self {
             lookup: HashMap::new(),
             data: Vec::new(),
-            component_index: TypeHashMap::default(),
+            component_index: ComponentIdHashMap::default(),
         }
     }
 
     /// Updates the component index when a new archetype is added.
     fn index_archetype(&mut self, index: usize, key: &ArchetypeKey) {
-        for &type_id in key.iter() {
+        for &component_id in key.iter() {
             self.component_index
-                .entry(type_id)
+                .entry(component_id)
                 .or_insert_with(Vec::new)
                 .push(index);
         }
@@ -90,8 +91,8 @@ impl Archetypes {
         let column_creators: Vec<_> = {
             let source = &self.data[source_index];
             key.iter()
-                .filter_map(|&type_id| {
-                    source.column_raw(type_id).map(|col| (type_id, col.create_empty()))
+                .filter_map(|&component_id| {
+                    source.column_raw(component_id).map(|col| (component_id, col.create_empty()))
                 })
                 .collect()
         };
@@ -102,8 +103,8 @@ impl Archetypes {
         
         let mut archetype = Archetype::new(key);
         // Initialize columns from source
-        for (type_id, column) in column_creators {
-            archetype.columns.insert(type_id, column);
+        for (component_id, column) in column_creators {
+            archetype.columns.insert(component_id, column);
         }
         
         self.data.push(archetype);
@@ -144,7 +145,7 @@ impl Archetypes {
 
     /// Returns indices of archetypes that contain all the given types.
     /// Uses the component index for O(smallest_set) lookup instead of O(all_archetypes).
-    pub fn matching(&self, required_types: &[TypeId]) -> Vec<usize> {
+    pub fn matching(&self, required_types: &[ComponentId]) -> Vec<usize> {
         if required_types.is_empty() {
             // No requirements - all archetypes match
             return (0..self.data.len()).collect();
@@ -154,8 +155,8 @@ impl Archetypes {
         let mut smallest_set: Option<&Vec<usize>> = None;
         let mut smallest_len = usize::MAX;
 
-        for &type_id in required_types {
-            match self.component_index.get(&type_id) {
+        for &component_id in required_types {
+            match self.component_index.get(&component_id) {
                 Some(indices) if indices.len() < smallest_len => {
                     smallest_len = indices.len();
                     smallest_set = Some(indices);
@@ -181,7 +182,7 @@ impl Archetypes {
             .copied()
             .filter(|&idx| {
                 let arch = &self.data[idx];
-                required_types.iter().all(|ty| arch.key.contains(*ty))
+                required_types.iter().all(|id| arch.key.contains(*id))
             })
             .collect()
     }
@@ -190,8 +191,8 @@ impl Archetypes {
     /// Uses the component index for efficient initial filtering.
     pub fn matching_filtered(
         &self,
-        required_types: &[TypeId],
-        excluded_types: &[TypeId],
+        required_types: &[ComponentId],
+        excluded_types: &[ComponentId],
     ) -> Vec<usize> {
         if required_types.is_empty() && excluded_types.is_empty() {
             return (0..self.data.len()).collect();
@@ -213,15 +214,15 @@ impl Archetypes {
             .into_iter()
             .filter(|&idx| {
                 let arch = &self.data[idx];
-                excluded_types.iter().all(|ty| !arch.key.contains(*ty))
+                excluded_types.iter().all(|id| !arch.key.contains(*id))
             })
             .collect()
     }
 
     /// Returns archetypes containing a specific component type.
     #[inline]
-    pub fn with_component(&self, type_id: TypeId) -> Option<&[usize]> {
-        self.component_index.get(&type_id).map(|v| v.as_slice())
+    pub fn with_component(&self, component_id: ComponentId) -> Option<&[usize]> {
+        self.component_index.get(&component_id).map(|v| v.as_slice())
     }
 
     /// Returns the number of archetypes.
@@ -237,7 +238,7 @@ impl Archetypes {
     /// Gets the target archetype for adding a component type.
     /// Uses cached graph edge if available, otherwise computes and caches.
     /// Returns None if the source archetype already contains the type.
-    pub fn get_add_target(&mut self, source: usize, adding: TypeId) -> Option<usize> {
+    pub fn get_add_target(&mut self, source: usize, adding: ComponentId) -> Option<usize> {
         // Check cache first (fast path)
         if let Some(&cached) = self.data[source].add_edges.get(&adding) {
             return Some(cached);
@@ -263,7 +264,7 @@ impl Archetypes {
     /// Gets the target archetype for removing a component type.
     /// Uses cached graph edge if available, otherwise computes and caches.
     /// Returns None if the source archetype doesn't contain the type.
-    pub fn get_remove_target(&mut self, source: usize, removing: TypeId) -> Option<usize> {
+    pub fn get_remove_target(&mut self, source: usize, removing: ComponentId) -> Option<usize> {
         // Check cache first (fast path)
         if let Some(&cached) = self.data[source].remove_edges.get(&removing) {
             return Some(cached);
@@ -292,14 +293,14 @@ impl Archetypes {
     /// # Arguments
     /// * `source` - Source archetype index
     /// * `bundle_type_id` - TypeId::of::<B>() where B is the bundle type
-    /// * `component_type_ids` - The individual component TypeIds in the bundle
+    /// * `component_ids` - The individual ComponentIds in the bundle
     /// 
     /// Returns None if all component types are already present.
     pub fn get_add_bundle_target(
         &mut self, 
         source: usize, 
         bundle_type_id: TypeId,
-        component_type_ids: &[TypeId],
+        component_ids: &[ComponentId],
     ) -> Option<usize> {
         // Fast path: check bundle cache (keyed by Bundle's TypeId)
         if let Some(&cached) = self.data[source].bundle_add_edges.get(&bundle_type_id) {
@@ -307,7 +308,7 @@ impl Archetypes {
         }
 
         // Compute new key using with_types (single allocation, no intermediate keys)
-        let new_key = self.data[source].key.with_types(component_type_ids)?;
+        let new_key = self.data[source].key.with_types(component_ids)?;
 
         // Check if this exact target archetype already exists
         let target = if let Some(&existing) = self.lookup.get(&new_key) {

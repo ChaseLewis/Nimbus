@@ -1,11 +1,17 @@
-use std::any::TypeId;
-
-use crate::{component::Component, entity::Entity, world::World};
+use crate::{
+    component::{Component, ComponentId},
+    entity::Entity,
+    world::World,
+};
 
 /// Collection of components that can be spawned together.
-pub trait Bundle: Sized {
-    /// Returns the component type identifiers contained in the bundle.
-    fn type_ids() -> Vec<TypeId>;
+pub trait Bundle: Sized + 'static {
+    /// The number of components in this bundle.
+    const LEN: usize;
+    
+    /// The component IDs in this bundle, as a const array.
+    /// Use `type_ids()` for a slice view.
+    const TYPE_IDS: &'static [ComponentId];
 
     /// Inserts every component of the bundle onto the entity.
     fn insert(self, entity: Entity, world: &mut World);
@@ -15,9 +21,8 @@ impl<T> Bundle for T
 where
     T: Component,
 {
-    fn type_ids() -> Vec<TypeId> {
-        vec![TypeId::of::<T>()]
-    }
+    const LEN: usize = 1;
+    const TYPE_IDS: &'static [ComponentId] = &[T::COMPONENT_ID];
 
     fn insert(self, entity: Entity, world: &mut World) {
         world.write_component(entity, self);
@@ -25,14 +30,13 @@ where
 }
 
 macro_rules! impl_bundle_tuple {
-    ($($name:ident),+) => {
+    ($len:expr, $($name:ident),+) => {
         impl<$($name),+> Bundle for ($($name,)+)
         where
             $($name: Component,)+
         {
-            fn type_ids() -> Vec<TypeId> {
-                vec![$(TypeId::of::<$name>()),+]
-            }
+            const LEN: usize = $len;
+            const TYPE_IDS: &'static [ComponentId] = &[$($name::COMPONENT_ID),+];
 
             #[allow(non_snake_case)]
             fn insert(self, entity: Entity, world: &mut World) {
@@ -45,10 +49,10 @@ macro_rules! impl_bundle_tuple {
     };
 }
 
-impl_bundle_tuple!(A, B);
-impl_bundle_tuple!(A, B, C);
-impl_bundle_tuple!(A, B, C, D);
-impl_bundle_tuple!(A, B, C, D, E);
-impl_bundle_tuple!(A, B, C, D, E, F);
-impl_bundle_tuple!(A, B, C, D, E, F, G);
-impl_bundle_tuple!(A, B, C, D, E, F, G, H);
+impl_bundle_tuple!(2, A, B);
+impl_bundle_tuple!(3, A, B, C);
+impl_bundle_tuple!(4, A, B, C, D);
+impl_bundle_tuple!(5, A, B, C, D, E);
+impl_bundle_tuple!(6, A, B, C, D, E, F);
+impl_bundle_tuple!(7, A, B, C, D, E, F, G);
+impl_bundle_tuple!(8, A, B, C, D, E, F, G, H);

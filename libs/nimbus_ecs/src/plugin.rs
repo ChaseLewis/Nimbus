@@ -5,11 +5,12 @@
 //!
 //! # Example
 //! ```
-//! use nimbus_ecs::{App, Plugin, Component, SystemPriority};
+//! use nimbus_ecs::{App, Plugin, Component, ComponentId, SystemPriority};
 //!
-//! // #[derive(Component)]  -- use this in your code
 //! struct Gravity(f32);
-//! # impl Component for Gravity {}
+//! impl Component for Gravity {
+//!     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+//! }
 //!
 //! struct PhysicsPlugin;
 //!

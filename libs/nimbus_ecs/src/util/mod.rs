@@ -2,5 +2,5 @@
 
 mod type_map;
 
-pub use type_map::{TypeHashMap, TypeHashSet};
+pub use type_map::{TypeHashMap, TypeHashSet, ComponentIdHashMap, ComponentIdHashSet};
 

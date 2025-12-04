@@ -6,7 +6,7 @@ use std::mem::size_of;
 
 use crate::{
     archetype::{Archetype, SendArchetypesPtr},
-    component::Component,
+    component::{Component, ComponentId},
     entity::Entity,
     world::UnsafeWorldCell,
 };
@@ -126,11 +126,11 @@ where
         // Check if we need to scan for new archetypes
 
         if state.last_archetype_count < current_count {
-            //TODO: This is a very hot path, we likely should have 'scratch pad' buffers to avoid reallocating any memory here        
             // Build required/excluded type lists
-            let mut required_types = P::required_types();
-            required_types.extend(F::required_types());
-            let excluded_types = F::excluded_types();
+            // For simple queries (single component, no filter), these use static slices
+            let mut required_types = P::collect_required();
+            required_types.extend(F::collect_required());
+            let excluded_types = F::collect_excluded();
             
             if state.last_archetype_count == 0 {
                 // First run: use component index for fast lookup
@@ -164,9 +164,9 @@ where
     pub(crate) fn new_from_world(cell: UnsafeWorldCell<'w>) -> Self {
         // Find all archetypes that contain the required component types
         // Combine required types from both query params and filters
-        let mut required_types = P::required_types();
-        required_types.extend(F::required_types());
-        let excluded_types = F::excluded_types();
+        let mut required_types = P::collect_required();
+        required_types.extend(F::collect_required());
+        let excluded_types = F::collect_excluded();
         
         // Use component index for O(smallest_set) matching instead of O(all_archetypes)
         let mut matching_archetypes = cell
@@ -426,17 +426,29 @@ pub trait QueryParam: sealed::Sealed {
     /// Cached column pointers for fast iteration within an archetype.
     type ColumnState<'a>;
 
-    /// Returns the TypeIds of components required by this query parameter.
-    fn required_types() -> Vec<TypeId>;
-
-    /// Returns the TypeIds of components read immutably.
-    fn read_types() -> Vec<TypeId> {
-        Vec::new()
+    /// ComponentIds of components required by this query parameter (const, no allocation).
+    const REQUIRED_IDS: &'static [ComponentId];
+    
+    /// ComponentIds of components read immutably (const, no allocation).
+    const READ_IDS: &'static [ComponentId] = &[];
+    
+    /// ComponentIds of components written mutably (const, no allocation).
+    const WRITE_IDS: &'static [ComponentId] = &[];
+    
+    /// Collects required ComponentIds. Uses const array for simple types.
+    /// Override for tuple types that need to combine multiple sources.
+    fn collect_required() -> Vec<ComponentId> {
+        Self::REQUIRED_IDS.to_vec()
     }
-
-    /// Returns the TypeIds of components written mutably.
-    fn write_types() -> Vec<TypeId> {
-        Vec::new()
+    
+    /// Collects read ComponentIds. Uses const array for simple types.
+    fn collect_reads() -> Vec<ComponentId> {
+        Self::READ_IDS.to_vec()
+    }
+    
+    /// Collects write ComponentIds. Uses const array for simple types.
+    fn collect_writes() -> Vec<ComponentId> {
+        Self::WRITE_IDS.to_vec()
     }
     
     /// Initializes column state for fast iteration over an archetype.
@@ -454,14 +466,20 @@ pub trait QueryParam: sealed::Sealed {
 
 /// Types that can filter entities in a [`Query`].
 pub trait QueryFilter {
-    /// Returns TypeIds that must NOT be present on matching archetypes.
-    fn excluded_types() -> Vec<TypeId> {
-        Vec::new()
+    /// ComponentIds that must NOT be present on matching archetypes.
+    const EXCLUDED_IDS: &'static [ComponentId] = &[];
+    
+    /// ComponentIds that MUST be present on matching archetypes.
+    const REQUIRED_IDS: &'static [ComponentId] = &[];
+    
+    /// Collects excluded ComponentIds. Uses const array for simple types.
+    fn collect_excluded() -> Vec<ComponentId> {
+        Self::EXCLUDED_IDS.to_vec()
     }
-
-    /// Returns TypeIds that MUST be present on matching archetypes.
-    fn required_types() -> Vec<TypeId> {
-        Vec::new()
+    
+    /// Collects required ComponentIds. Uses const array for simple types.
+    fn collect_required() -> Vec<ComponentId> {
+        Self::REQUIRED_IDS.to_vec()
     }
 }
 
@@ -474,14 +492,11 @@ impl<T: Component> QueryParam for &T {
     type Item<'a> = &'a T;
     type ColumnState<'a> = &'a [T];
 
-    fn required_types() -> Vec<TypeId> {
-        const { assert!(size_of::<T>() > 0, "Cannot query zero-sized types. Use With<T> filter instead.") };
-        vec![TypeId::of::<T>()]
-    }
-
-    fn read_types() -> Vec<TypeId> {
-        vec![TypeId::of::<T>()]
-    }
+    const REQUIRED_IDS: &'static [ComponentId] = {
+        assert!(size_of::<T>() > 0, "Cannot query zero-sized types. Use With<T> filter instead.");
+        &[T::COMPONENT_ID]
+    };
+    const READ_IDS: &'static [ComponentId] = &[T::COMPONENT_ID];
     
     #[inline]
     fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
@@ -504,14 +519,11 @@ impl<T: Component> QueryParam for &mut T {
     type Item<'a> = &'a mut T;
     type ColumnState<'a> = *mut T;  // Pointer to start of column data
 
-    fn required_types() -> Vec<TypeId> {
-        const { assert!(size_of::<T>() > 0, "Cannot query zero-sized types. Use With<T> filter instead.") };
-        vec![TypeId::of::<T>()]
-    }
-
-    fn write_types() -> Vec<TypeId> {
-        vec![TypeId::of::<T>()]
-    }
+    const REQUIRED_IDS: &'static [ComponentId] = {
+        assert!(size_of::<T>() > 0, "Cannot query zero-sized types. Use With<T> filter instead.");
+        &[T::COMPONENT_ID]
+    };
+    const WRITE_IDS: &'static [ComponentId] = &[T::COMPONENT_ID];
     
     #[inline]
     fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
@@ -540,10 +552,7 @@ impl QueryParam for Entity {
     type Item<'a> = Entity;
     type ColumnState<'a> = &'a [Entity];
 
-    fn required_types() -> Vec<TypeId> {
-        // Entity doesn't require any component types
-        Vec::new()
-    }
+    const REQUIRED_IDS: &'static [ComponentId] = &[];
     
     fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
         Some(archetype.entities())
@@ -564,10 +573,8 @@ impl<P: QueryParam> QueryParam for Option<P> {
     type Item<'a> = Option<P::Item<'a>>;
     type ColumnState<'a> = Option<P::ColumnState<'a>>;
 
-    fn required_types() -> Vec<TypeId> {
-        // Optional components don't add required types
-        Vec::new()
-    }
+    // Optional components don't add required types
+    const REQUIRED_IDS: &'static [ComponentId] = &[];
     
     fn init_columns<'a>(archetype: &'a Archetype) -> Option<Self::ColumnState<'a>> {
         // Always succeeds - the Option wraps whether the column exists
@@ -588,32 +595,32 @@ impl<P: QueryParam> QueryParam for Option<P> {
 pub struct With<T: Component>(PhantomData<T>);
 
 impl<T: Component> QueryFilter for With<T> {
-    fn required_types() -> Vec<TypeId> {
-        vec![TypeId::of::<T>()]
-    }
+    const REQUIRED_IDS: &'static [ComponentId] = &[T::COMPONENT_ID];
 }
 
 /// Query filter that requires an entity to NOT have component T.
 pub struct Without<T: Component>(PhantomData<T>);
 
 impl<T: Component> QueryFilter for Without<T> {
-    fn excluded_types() -> Vec<TypeId> {
-        vec![TypeId::of::<T>()]
-    }
+    const EXCLUDED_IDS: &'static [ComponentId] = &[T::COMPONENT_ID];
 }
 // Implement QueryFilter for tuples of filters
 macro_rules! impl_query_filter_tuple {
     ($($name:ident),+) => {
         impl<$($name: QueryFilter),+> QueryFilter for ($($name,)+) {
-            fn excluded_types() -> Vec<TypeId> {
+            // Tuple filters can't use const arrays (no const concat)
+            const EXCLUDED_IDS: &'static [ComponentId] = &[];
+            const REQUIRED_IDS: &'static [ComponentId] = &[];
+            
+            fn collect_excluded() -> Vec<ComponentId> {
                 let mut types = Vec::new();
-                $(types.extend($name::excluded_types());)+
+                $(types.extend_from_slice($name::EXCLUDED_IDS);)+
                 types
             }
-
-            fn required_types() -> Vec<TypeId> {
+            
+            fn collect_required() -> Vec<ComponentId> {
                 let mut types = Vec::new();
-                $(types.extend($name::required_types());)+
+                $(types.extend_from_slice($name::REQUIRED_IDS);)+
                 types
             }
         }
@@ -638,21 +645,26 @@ macro_rules! impl_query_param_tuple {
             type Item<'a> = ($($name::Item<'a>,)+);
             type ColumnState<'a> = ($($name::ColumnState<'a>,)+);
 
-            fn required_types() -> Vec<TypeId> {
+            // Tuple params can't use const arrays (no const concat)
+            const REQUIRED_IDS: &'static [ComponentId] = &[];
+            const READ_IDS: &'static [ComponentId] = &[];
+            const WRITE_IDS: &'static [ComponentId] = &[];
+            
+            fn collect_required() -> Vec<ComponentId> {
                 let mut types = Vec::new();
-                $(types.extend($name::required_types());)+
+                $(types.extend_from_slice($name::REQUIRED_IDS);)+
                 types
             }
-
-            fn read_types() -> Vec<TypeId> {
+            
+            fn collect_reads() -> Vec<ComponentId> {
                 let mut types = Vec::new();
-                $(types.extend($name::read_types());)+
+                $(types.extend_from_slice($name::READ_IDS);)+
                 types
             }
-
-            fn write_types() -> Vec<TypeId> {
+            
+            fn collect_writes() -> Vec<ComponentId> {
                 let mut types = Vec::new();
-                $(types.extend($name::write_types());)+
+                $(types.extend_from_slice($name::WRITE_IDS);)+
                 types
             }
             
@@ -709,8 +721,8 @@ impl<P: QueryParam + 'static, F: QueryFilter + 'static> SystemParam for Query<'_
 
     fn access() -> crate::parallel_world::ParamAccess {
         crate::parallel_world::ParamAccess {
-            reads: P::read_types(),
-            writes: P::write_types(),
+            reads: P::collect_reads(),
+            writes: P::collect_writes(),
             exclusive: false,
         }
     }

@@ -9,7 +9,7 @@ use crate::{
     archetype::{ArchetypeKey, Archetypes},
     bundle::Bundle,
     commands::CommandQueue,
-    component::Component,
+    component::{Component, ComponentId},
     entity::{Entities, Entity, EntityLocation},
     system_param::{Query, QueryFilter, QueryParam, SystemParamError},
     systems::{IntoSystem, System},
@@ -135,8 +135,8 @@ impl World {
             cached_index
         } else {
             // Slow path: build key and ensure archetype exists, then cache
-            let types = B::type_ids();
-            let key = ArchetypeKey::new(types);
+            let types = B::TYPE_IDS;
+            let key = ArchetypeKey::from_slice(types);
             let index = self.archetypes.ensure(key);
             self.bundle_archetype_cache.insert(bundle_type_id, index);
             index
@@ -163,11 +163,12 @@ impl World {
     /// 
     /// # Example
     /// ```
-    /// use nimbus_ecs::{World, Component};
+    /// use nimbus_ecs::{World, Component, ComponentId};
     ///
-    /// // #[derive(Component)]  -- use this in your code
     /// struct Position { x: f32, y: f32 }
-    /// # impl Component for Position {}
+    /// impl Component for Position {
+    ///     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+    /// }
     ///
     /// let mut world = World::new();
     /// let positions = vec![
@@ -195,8 +196,8 @@ impl World {
         let archetype_index = if let Some(&cached_index) = self.bundle_archetype_cache.get(&bundle_type_id) {
             cached_index
         } else {
-            let types = B::type_ids();
-            let key = ArchetypeKey::new(types);
+            let types = B::TYPE_IDS;
+            let key = ArchetypeKey::from_slice(types);
             let index = self.archetypes.ensure(key);
             self.bundle_archetype_cache.insert(bundle_type_id, index);
             index
@@ -252,9 +253,9 @@ impl World {
         
         let location = self.entities.location(entity).unwrap();
         let current_key = self.archetypes.key(location.archetype).cloned().unwrap_or_default();
-        let type_id = TypeId::of::<T>();
+        let component_id = ComponentId::of::<T>();
         
-        if current_key.contains(type_id) {
+        if current_key.contains(component_id) {
             // Component already exists - just update in place
             let archetype = self.archetypes.get_mut(location.archetype).unwrap();
             if let Some(col) = archetype.column_mut::<T>() {
@@ -286,11 +287,11 @@ impl World {
         
         // Use Bundle's TypeId as cache key for O(1) transition lookup
         let bundle_type_id = TypeId::of::<B>();
-        let component_type_ids = B::type_ids();
+        let component_ids = B::TYPE_IDS;
         let new_archetype_index = self.archetypes.get_add_bundle_target(
             old_archetype_index, 
             bundle_type_id,
-            &component_type_ids,
+            component_ids,
         );
         
         match new_archetype_index {
@@ -399,7 +400,7 @@ impl World {
     /// * `batch` - Iterator of (Entity, Bundle) pairs
     pub fn insert_bundle_batch<B: Bundle + 'static>(&mut self, batch: impl IntoIterator<Item = (Entity, B)>) {
         let bundle_type_id = TypeId::of::<B>();
-        let component_type_ids = B::type_ids();
+        let component_ids = B::TYPE_IDS;
         
         // Collect and group by source archetype in one pass
         let mut groups: hashbrown::HashMap<usize, Vec<(Entity, usize, B)>> = hashbrown::HashMap::new();
@@ -419,7 +420,7 @@ impl World {
         
         // Process each archetype group
         for (source_arch_idx, entities_bundles) in groups {
-            self.migrate_bundle_batch::<B>(source_arch_idx, bundle_type_id, &component_type_ids, entities_bundles);
+            self.migrate_bundle_batch::<B>(source_arch_idx, bundle_type_id, component_ids, entities_bundles);
         }
     }
     
@@ -428,7 +429,7 @@ impl World {
         &mut self,
         source_arch_idx: usize,
         bundle_type_id: TypeId,
-        component_type_ids: &[TypeId],
+        component_ids: &[ComponentId],
         mut entities_bundles: Vec<(Entity, usize, B)>,
     ) {
         if entities_bundles.is_empty() {
@@ -439,7 +440,7 @@ impl World {
         let target_arch_idx = match self.archetypes.get_add_bundle_target(
             source_arch_idx,
             bundle_type_id,
-            component_type_ids,
+            component_ids,
         ) {
             Some(idx) => idx,
             None => {
@@ -540,9 +541,9 @@ impl World {
 
         let location = self.entities.location(entity)?;
         let current_key = self.archetypes.key(location.archetype).cloned()?;
-        let type_id = TypeId::of::<T>();
+        let component_id = ComponentId::of::<T>();
         
-        if !current_key.contains(type_id) {
+        if !current_key.contains(component_id) {
             return None;
         }
 
@@ -563,7 +564,7 @@ impl World {
             return;
         }
         
-        let type_id = TypeId::of::<T>();
+        let component_id = ComponentId::of::<T>();
         
         // Group entities by their current archetype
         let mut groups: hashbrown::HashMap<usize, Vec<(Entity, usize)>> = hashbrown::HashMap::new();
@@ -576,7 +577,7 @@ impl World {
             if let Some(location) = self.entities.location(entity) {
                 // Check if entity actually has this component
                 if let Some(key) = self.archetypes.key(location.archetype) {
-                    if key.contains(type_id) {
+                    if key.contains(component_id) {
                         groups
                             .entry(location.archetype)
                             .or_default()
@@ -602,10 +603,10 @@ impl World {
             return;
         }
         
-        let type_id = TypeId::of::<T>();
+        let component_id = ComponentId::of::<T>();
         
         // Get target archetype
-        let target_arch_idx = match self.archetypes.get_remove_target(source_arch_idx, type_id) {
+        let target_arch_idx = match self.archetypes.get_remove_target(source_arch_idx, component_id) {
             Some(idx) => idx,
             None => return, // Component not in archetype
         };
@@ -734,11 +735,12 @@ impl World {
     /// 
     /// # Example
     /// ```
-    /// use nimbus_ecs::{World, Component};
+    /// use nimbus_ecs::{World, Component, ComponentId};
     ///
-    /// // #[derive(Component)]  -- use this in your code
     /// struct Position { x: f32, y: f32 }
-    /// # impl Component for Position {}
+    /// impl Component for Position {
+    ///     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+    /// }
     ///
     /// let mut world = World::new();
     /// world.spawn_with(Position { x: 1.0, y: 2.0 });
@@ -764,14 +766,16 @@ impl World {
     /// 
     /// # Example
     /// ```
-    /// use nimbus_ecs::{World, Component, With};
+    /// use nimbus_ecs::{World, Component, ComponentId, With};
     ///
-    /// // #[derive(Component)]  -- use this in your code
     /// struct Position { x: f32, y: f32 }
-    /// # impl Component for Position {}
-    /// // #[derive(Component)]
+    /// impl Component for Position {
+    ///     const COMPONENT_ID: ComponentId = ComponentId::new(0x1234);
+    /// }
     /// struct Velocity { x: f32, y: f32 }
-    /// # impl Component for Velocity {}
+    /// impl Component for Velocity {
+    ///     const COMPONENT_ID: ComponentId = ComponentId::new(0x5678);
+    /// }
     ///
     /// let mut world = World::new();
     /// world.spawn_with((Position { x: 0.0, y: 0.0 }, Velocity { x: 1.0, y: 0.0 }));
@@ -901,8 +905,8 @@ impl World {
         let old_archetype_index = location.archetype;
 
         // Use cached graph edge for O(1) archetype transition lookup
-        let type_id = TypeId::of::<T>();
-        let new_archetype_index = match self.archetypes.get_add_target(old_archetype_index, type_id) {
+        let component_id = ComponentId::of::<T>();
+        let new_archetype_index = match self.archetypes.get_add_target(old_archetype_index, component_id) {
             Some(idx) => idx,
             None => return, // Already has this component
         };
@@ -974,13 +978,13 @@ impl World {
     /// Migrates an entity to a new archetype by removing a component.
     fn migrate_entity_remove_component<T: Component>(&mut self, entity: Entity) -> Option<T> {
         let location = self.entities.location(entity)?;
-        let type_id = TypeId::of::<T>();
+        let component_id = ComponentId::of::<T>();
         
         let old_row = location.slot;
         let old_archetype_index = location.archetype;
 
         // Use cached graph edge for O(1) archetype transition lookup
-        let new_archetype_index = self.archetypes.get_remove_target(old_archetype_index, type_id)?;
+        let new_archetype_index = self.archetypes.get_remove_target(old_archetype_index, component_id)?;
         
         // Get the new key for iterating components to move
         let new_key = self.archetypes.key(new_archetype_index).cloned()?;

@@ -2,66 +2,27 @@
 //! Tests the production implementation using HashSet with identity hasher.
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion};
-use nimbus_ecs::ArchetypeKey;
-use std::any::TypeId;
+use nimbus_ecs::{ArchetypeKey, ComponentId};
+use nimbus_ecs::component::const_fnv1a_64_str;
 
 // ============================================================================
-// Type ID generation
+// ComponentId generation
 // ============================================================================
 
-macro_rules! define_marker_types {
-    ($($n:ident),*) => {
-        $(struct $n;)*
-        
-        fn get_type_id(index: usize) -> TypeId {
-            const TYPE_IDS: &[fn() -> TypeId] = &[
-                $(|| TypeId::of::<$n>()),*
-            ];
-            TYPE_IDS[index % TYPE_IDS.len()]()
-        }
-    };
+/// Generate well-distributed ComponentIds that simulate real FNV-1a hashes.
+/// Sequential IDs would cluster badly with identity hashing.
+fn get_component_id(index: usize) -> ComponentId {
+    // Simulate real component IDs by hashing a type-name-like string
+    let name = format!("BenchComponent{}", index);
+    ComponentId::new(const_fnv1a_64_str(&name))
 }
 
-// Define 256 unique marker types for benchmarking
-define_marker_types!(
-    T0, T1, T2, T3, T4, T5, T6, T7, T8, T9,
-    T10, T11, T12, T13, T14, T15, T16, T17, T18, T19,
-    T20, T21, T22, T23, T24, T25, T26, T27, T28, T29,
-    T30, T31, T32, T33, T34, T35, T36, T37, T38, T39,
-    T40, T41, T42, T43, T44, T45, T46, T47, T48, T49,
-    T50, T51, T52, T53, T54, T55, T56, T57, T58, T59,
-    T60, T61, T62, T63, T64, T65, T66, T67, T68, T69,
-    T70, T71, T72, T73, T74, T75, T76, T77, T78, T79,
-    T80, T81, T82, T83, T84, T85, T86, T87, T88, T89,
-    T90, T91, T92, T93, T94, T95, T96, T97, T98, T99,
-    T100, T101, T102, T103, T104, T105, T106, T107, T108, T109,
-    T110, T111, T112, T113, T114, T115, T116, T117, T118, T119,
-    T120, T121, T122, T123, T124, T125, T126, T127, T128, T129,
-    T130, T131, T132, T133, T134, T135, T136, T137, T138, T139,
-    T140, T141, T142, T143, T144, T145, T146, T147, T148, T149,
-    T150, T151, T152, T153, T154, T155, T156, T157, T158, T159,
-    T160, T161, T162, T163, T164, T165, T166, T167, T168, T169,
-    T170, T171, T172, T173, T174, T175, T176, T177, T178, T179,
-    T180, T181, T182, T183, T184, T185, T186, T187, T188, T189,
-    T190, T191, T192, T193, T194, T195, T196, T197, T198, T199,
-    T200, T201, T202, T203, T204, T205, T206, T207, T208, T209,
-    T210, T211, T212, T213, T214, T215, T216, T217, T218, T219,
-    T220, T221, T222, T223, T224, T225, T226, T227, T228, T229,
-    T230, T231, T232, T233, T234, T235, T236, T237, T238, T239,
-    T240, T241, T242, T243, T244, T245, T246, T247, T248, T249,
-    T250, T251, T252, T253, T254, T255
-);
-
-// ============================================================================
-// Helper functions
-// ============================================================================
-
-fn get_new_type_id(key_size: usize) -> TypeId {
-    get_type_id(key_size)
+fn get_new_component_id(key_size: usize) -> ComponentId {
+    get_component_id(key_size)
 }
 
-fn get_existing_type_id(key_size: usize) -> TypeId {
-    get_type_id(key_size / 2)
+fn get_existing_component_id(key_size: usize) -> ComponentId {
+    get_component_id(key_size / 2)
 }
 
 // ============================================================================
@@ -72,11 +33,11 @@ fn bench_contains(c: &mut Criterion) {
     let mut group = c.benchmark_group("contains");
 
     for size in [5, 10, 20, 50] {
-        let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
+        let types: Vec<ComponentId> = (0..size).map(get_component_id).collect();
         let key = ArchetypeKey::new(types);
 
-        let existing = get_existing_type_id(size);
-        let non_existing = get_new_type_id(size);
+        let existing = get_existing_component_id(size);
+        let non_existing = get_new_component_id(size);
 
         group.bench_with_input(
             BenchmarkId::new("existing", size),
@@ -97,10 +58,10 @@ fn bench_with_type(c: &mut Criterion) {
     let mut group = c.benchmark_group("with_type");
 
     for size in [5, 10, 20, 50] {
-        let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
+        let types: Vec<ComponentId> = (0..size).map(get_component_id).collect();
         let key = ArchetypeKey::new(types);
 
-        let new_type = get_new_type_id(size);
+        let new_type = get_new_component_id(size);
 
         group.bench_with_input(BenchmarkId::new("add", size), &size, |b, _| {
             b.iter(|| black_box(key.with_type(black_box(new_type))))
@@ -114,10 +75,10 @@ fn bench_without_type(c: &mut Criterion) {
     let mut group = c.benchmark_group("without_type");
 
     for size in [5, 10, 20, 50] {
-        let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
+        let types: Vec<ComponentId> = (0..size).map(get_component_id).collect();
         let key = ArchetypeKey::new(types);
 
-        let existing = get_existing_type_id(size);
+        let existing = get_existing_component_id(size);
 
         group.bench_with_input(BenchmarkId::new("remove", size), &size, |b, _| {
             b.iter(|| black_box(key.without_type(black_box(existing))))
@@ -131,7 +92,7 @@ fn bench_new(c: &mut Criterion) {
     let mut group = c.benchmark_group("new");
 
     for size in [5, 10, 20, 50] {
-        let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
+        let types: Vec<ComponentId> = (0..size).map(get_component_id).collect();
 
         group.bench_with_input(BenchmarkId::new("construct", size), &types, |b, types| {
             b.iter(|| black_box(ArchetypeKey::from_iter(black_box(types.iter().copied()))))
@@ -145,11 +106,11 @@ fn bench_contains_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("contains_all");
 
     for size in [5, 10, 20, 50] {
-        let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
+        let types: Vec<ComponentId> = (0..size).map(get_component_id).collect();
         let key = ArchetypeKey::new(types);
 
         // Query for half the types
-        let query_types: Vec<TypeId> = (0..size / 2).map(get_type_id).collect();
+        let query_types: Vec<ComponentId> = (0..size / 2).map(get_component_id).collect();
 
         group.bench_with_input(BenchmarkId::new("half", size), &size, |b, _| {
             b.iter(|| black_box(key.contains_all(black_box(&query_types))))
