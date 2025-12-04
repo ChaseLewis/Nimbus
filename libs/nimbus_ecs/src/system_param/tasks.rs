@@ -146,11 +146,71 @@ impl<'a> Tasks<'a> {
     {
         self.pool.par_map(items, f)
     }
+    
+    /// Processes slice chunks in parallel (immutable).
+    ///
+    /// Each chunk is processed by a separate thread. The function receives
+    /// an immutable slice of `chunk_size` items (last chunk may be smaller).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn process_data(tasks: Tasks) {
+    ///     let data: Vec<i32> = (0..1000).collect();
+    ///     let sum = AtomicUsize::new(0);
+    ///
+    ///     tasks.par_chunks(&data, 100, |chunk| {
+    ///         let chunk_sum: i32 = chunk.iter().sum();
+    ///         sum.fetch_add(chunk_sum as usize, Ordering::Relaxed);
+    ///     });
+    /// }
+    /// ```
+    #[inline]
+    pub fn par_chunks<T, F>(&self, items: &[T], chunk_size: usize, f: F)
+    where
+        T: Sync,
+        F: Fn(&[T]) + Sync + Send,
+    {
+        self.pool.par_chunks(items, chunk_size, f);
+    }
+    
+    /// Processes slice chunks in parallel (mutable).
+    ///
+    /// Each chunk is processed by a separate thread. The function receives
+    /// a mutable slice of `chunk_size` items (last chunk may be smaller).
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn double_data(tasks: Tasks) {
+    ///     let mut data: Vec<i32> = (0..1000).collect();
+    ///
+    ///     tasks.par_chunks_mut(&mut data, 100, |chunk| {
+    ///         for x in chunk {
+    ///             *x *= 2;
+    ///         }
+    ///     });
+    /// }
+    /// ```
+    #[inline]
+    pub fn par_chunks_mut<T, F>(&self, items: &mut [T], chunk_size: usize, f: F)
+    where
+        T: Send,
+        F: Fn(&mut [T]) + Sync + Send,
+    {
+        self.pool.par_chunks_mut(items, chunk_size, f);
+    }
 
     /// Returns the number of worker threads in the pool.
     #[inline]
     pub fn thread_count(&self) -> usize {
         self.pool.thread_count()
+    }
+    
+    /// Returns the underlying task pool reference.
+    #[inline]
+    pub fn pool(&self) -> &TaskPool {
+        self.pool
     }
 }
 
@@ -273,6 +333,53 @@ mod tests {
 
         let result = world.run_system(needs_tasks);
         assert!(result.is_err());
+    }
+    
+    #[test]
+    fn tasks_par_chunks() {
+        let mut world = World::new();
+        world.insert_singleton(TaskPool::new());
+        
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        
+        fn chunked_sum(tasks: Tasks) {
+            let data: Vec<i32> = (0..1000).collect();
+            let sum = AtomicUsize::new(0);
+            
+            tasks.par_chunks(&data, 100, |chunk| {
+                let chunk_sum: i32 = chunk.iter().sum();
+                sum.fetch_add(chunk_sum as usize, Ordering::Relaxed);
+            });
+            
+            // Sum of 0..1000 = 999 * 1000 / 2 = 499500
+            assert_eq!(sum.load(Ordering::SeqCst), 499500);
+        }
+        
+        world.run_system(chunked_sum).unwrap();
+    }
+    
+    #[test]
+    fn tasks_par_chunks_mut() {
+        let mut world = World::new();
+        world.insert_singleton(TaskPool::new());
+        
+        fn double_chunks(tasks: Tasks) {
+            let mut data: Vec<i32> = (0..100).collect();
+            
+            tasks.par_chunks_mut(&mut data, 10, |chunk| {
+                for x in chunk {
+                    *x *= 2;
+                }
+            });
+            
+            // Verify all values were doubled
+            assert_eq!(data[0], 0);
+            assert_eq!(data[1], 2);
+            assert_eq!(data[50], 100);
+            assert_eq!(data[99], 198);
+        }
+        
+        world.run_system(double_chunks).unwrap();
     }
 }
 

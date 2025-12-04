@@ -292,6 +292,73 @@ impl TaskPool {
         use rayon::prelude::*;
         self.inner.install(|| items.par_iter().map(f).collect())
     }
+    
+    /// Processes slice chunks in parallel (immutable).
+    ///
+    /// Each chunk is processed by a separate thread. The function receives
+    /// an immutable slice of `chunk_size` items (last chunk may be smaller).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nimbus_ecs::task::TaskPool;
+    /// use std::sync::atomic::{AtomicUsize, Ordering};
+    ///
+    /// let pool = TaskPool::new();
+    /// let data: Vec<i32> = (0..1000).collect();
+    /// let sum = AtomicUsize::new(0);
+    ///
+    /// pool.par_chunks(&data, 100, |chunk| {
+    ///     let chunk_sum: i32 = chunk.iter().sum();
+    ///     sum.fetch_add(chunk_sum as usize, Ordering::Relaxed);
+    /// });
+    ///
+    /// assert_eq!(sum.load(Ordering::SeqCst), 499500);
+    /// ```
+    pub fn par_chunks<T, F>(&self, items: &[T], chunk_size: usize, f: F)
+    where
+        T: Sync,
+        F: Fn(&[T]) + Sync + Send,
+    {
+        use rayon::prelude::*;
+        self.inner.install(|| {
+            items.par_chunks(chunk_size).for_each(f);
+        });
+    }
+    
+    /// Processes slice chunks in parallel (mutable).
+    ///
+    /// Each chunk is processed by a separate thread. The function receives
+    /// a mutable slice of `chunk_size` items (last chunk may be smaller).
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use nimbus_ecs::task::TaskPool;
+    ///
+    /// let pool = TaskPool::new();
+    /// let mut data: Vec<i32> = (0..1000).collect();
+    ///
+    /// pool.par_chunks_mut(&mut data, 100, |chunk| {
+    ///     for x in chunk {
+    ///         *x *= 2;
+    ///     }
+    /// });
+    ///
+    /// assert_eq!(data[0], 0);
+    /// assert_eq!(data[1], 2);
+    /// assert_eq!(data[999], 1998);
+    /// ```
+    pub fn par_chunks_mut<T, F>(&self, items: &mut [T], chunk_size: usize, f: F)
+    where
+        T: Send,
+        F: Fn(&mut [T]) + Sync + Send,
+    {
+        use rayon::prelude::*;
+        self.inner.install(|| {
+            items.par_chunks_mut(chunk_size).for_each(f);
+        });
+    }
 
     // =========================================================================
     // Direct Rayon Access
