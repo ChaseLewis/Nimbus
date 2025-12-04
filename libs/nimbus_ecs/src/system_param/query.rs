@@ -5,13 +5,27 @@ use std::marker::PhantomData;
 use std::mem::size_of;
 
 use crate::{
-    archetype::Archetype,
+    archetype::{Archetype, SendArchetypesPtr},
     component::Component,
     entity::Entity,
     world::UnsafeWorldCell,
 };
 
 use super::{SystemParam, SystemParamError};
+
+/// Send+Sync wrapper for slice pointer, used in par_for_each.
+/// SAFETY: We ensure the slice outlives the scope and only read from it.
+#[derive(Clone, Copy)]
+struct SendSlicePtr(*const [usize]);
+unsafe impl Send for SendSlicePtr {}
+unsafe impl Sync for SendSlicePtr {}
+
+impl SendSlicePtr {
+    #[inline]
+    unsafe fn as_slice(&self) -> &[usize] {
+        unsafe { &*self.0 }
+    }
+}
 
 /// Sealed trait pattern to prevent external implementations of QueryParam.
 mod sealed {
@@ -110,7 +124,9 @@ where
         let current_count = archetypes.len();
         
         // Check if we need to scan for new archetypes
+
         if state.last_archetype_count < current_count {
+            //TODO: This is a very hot path, we likely should have 'scratch pad' buffers to avoid reallocating any memory here        
             // Build required/excluded type lists
             let mut required_types = P::required_types();
             required_types.extend(F::required_types());
@@ -120,7 +136,9 @@ where
                 // First run: use component index for fast lookup
                 state.matching_archetypes = archetypes.matching_filtered(&required_types, &excluded_types);
             } else {
-                // Incremental: only scan new archetypes
+                // Incremental: only scan new archetypes - we assume that archetypes on average shouldn't
+                // change too much and this is probably faster than a full recompute. With 'matching_filtered'
+                // this should probably be actually tested and benchmarked.
                 for (idx, arch) in archetypes.iter().skip(state.last_archetype_count) {
                     let has_required = required_types.iter().all(|ty| arch.key().contains(*ty));
                     let not_excluded = excluded_types.iter().all(|ty| !arch.key().contains(*ty));
@@ -178,6 +196,165 @@ where
             current_len: 0,
             _marker: PhantomData,
         }
+    }
+
+    /// Process each query result in parallel with explicit chunk sizing.
+    ///
+    /// Work is distributed across threads in chunks of `chunk_size` entities.
+    /// Chunks can span archetype boundaries for optimal load balancing - only
+    /// the final chunk may be undersized.
+    ///
+    /// For automatic chunk sizing, use [`par_for_each`] instead.
+    ///
+    /// # Arguments
+    ///
+    /// * `pool` - The task pool to use for parallel execution
+    /// * `chunk_size` - Target number of entities per work unit (tune based on workload)
+    /// * `f` - Function to execute on each query result
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn physics_system(mut query: Query<(&mut Position, &Velocity)>, tasks: Tasks) {
+    ///     query.par_for_each_chunk(tasks.pool(), 256, |(pos, vel)| {
+    ///         pos.x += vel.x;
+    ///         pos.y += vel.y;
+    ///     });
+    /// }
+    /// ```
+    #[inline]
+    pub fn par_for_each_chunk<Func>(&mut self, pool: &crate::task::TaskPool, chunk_size: usize, f: Func)
+    where
+        Func: Fn(P::Item<'_>) + Send + Sync,
+        P: Send + Sync,
+    {
+        use smallvec::SmallVec;
+        
+        let archetypes_slice = self.matching_archetypes.as_slice();
+        let archetypes = SendArchetypesPtr::new(self.world.archetypes());
+        let indices = SendSlicePtr(archetypes_slice as *const [usize]);
+        
+        pool.scope(|scope| {
+            // Segments for current work unit: (archetype_index, start_row, end_row)
+            let mut segments: SmallVec<[(usize, usize, usize); 2]> = SmallVec::new();
+            let mut current_size = 0usize;
+            
+            // SAFETY: indices pointer is valid for the duration of the scope
+            for &arch_idx in unsafe { indices.as_slice() } {
+                let arch_len = match unsafe { archetypes.get(arch_idx) } {
+                    Some(a) if a.len() > 0 => a.len(),
+                    _ => continue,
+                };
+                
+                let mut row = 0usize;
+                
+                while row < arch_len {
+                    let available = arch_len - row;
+                    let needed = chunk_size.saturating_sub(current_size);
+                    let take = available.min(needed);
+                    
+                    if take > 0 {
+                        segments.push((arch_idx, row, row + take));
+                        current_size += take;
+                        row += take;
+                    }
+                    
+                    // Spawn immediately when chunk is full
+                    if current_size >= chunk_size {
+                        let unit = std::mem::take(&mut segments);
+                        let f = &f;
+                        let archetypes = archetypes; // Copy the Send+Sync pointer
+                        
+                        scope.spawn(move |_| {
+                            for (arch_idx, start, end) in unit {
+                                // SAFETY: Each segment covers disjoint rows,
+                                // and archetypes outlives the scope
+                                let archetype = unsafe { archetypes.get(arch_idx) }.unwrap();
+                                
+                                if let Some(mut col_state) = P::init_columns(archetype) {
+                                    for r in start..end {
+                                        f(P::fetch_from_columns(&mut col_state, r));
+                                    }
+                                }
+                            }
+                        });
+                        current_size = 0;
+                    }
+                }
+            }
+            
+            // Spawn the tail (the only potentially undersized chunk)
+            if !segments.is_empty() {
+                let f = &f;
+                let archetypes = archetypes;
+                
+                scope.spawn(move |_| {
+                    for (arch_idx, start, end) in segments {
+                        let archetype = unsafe { archetypes.get(arch_idx) }.unwrap();
+                        
+                        if let Some(mut col_state) = P::init_columns(archetype) {
+                            for r in start..end {
+                                f(P::fetch_from_columns(&mut col_state, r));
+                            }
+                        }
+                    }
+                });
+            }
+        });
+    }
+    
+    /// Process each query result in parallel with automatic chunk sizing.
+    ///
+    /// Automatically determines chunk size based on total entity count and
+    /// thread count for optimal load balancing. This is the recommended method
+    /// for most use cases.
+    ///
+    /// For fine-grained control over chunk size, use [`par_for_each_chunk`].
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// fn physics_system(mut query: Query<(&mut Position, &Velocity)>, tasks: Tasks) {
+    ///     query.par_for_each(tasks.pool(), |(pos, vel)| {
+    ///         pos.x += vel.x;
+    ///         pos.y += vel.y;
+    ///     });
+    /// }
+    /// ```
+    /// 
+    #[inline]
+    pub fn par_for_each<Func>(&mut self, pool: &crate::task::TaskPool, f: Func)
+    where
+        Func: Fn(P::Item<'_>) + Send + Sync,
+        P: Send + Sync,
+    {
+        // Minimum batch size to avoid spawn overhead dominating
+        const MIN_BATCH: usize = 64;
+        // Sequential threshold - don't bother parallelizing tiny queries
+        const SEQ_THRESHOLD: usize = 128;
+        
+        // Count total entities across matching archetypes
+        let archetypes_ref = self.world.archetypes();
+        let total: usize = self.matching_archetypes
+            .as_slice()
+            .iter()
+            .filter_map(|&idx| archetypes_ref.get(idx))
+            .map(|a| a.len())
+            .sum();
+        
+        if total < SEQ_THRESHOLD {
+            // Run sequentially - overhead isn't worth it
+            for item in self.iter() {
+                f(item);
+            }
+            return;
+        }
+        
+        // Target ~2x thread count chunks for good work-stealing
+        let num_threads = pool.thread_count().max(1);
+        let chunk_size = (total / (num_threads * 2)).max(MIN_BATCH);
+        
+        self.par_for_each_chunk(pool, chunk_size, f);
     }
 }
 
@@ -768,6 +945,299 @@ mod tests {
             .collect();
         assert_eq!(with_velocity.len(), 1);
         assert_eq!(with_velocity[0], (e3, 3.0, 0.5));
+    }
+
+    // =========================================================================
+    // Parallel iteration tests
+    // =========================================================================
+
+    mod parallel {
+        use super::*;
+        use crate::task::TaskPool;
+        use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        #[derive(Component, Clone)]
+        struct Value(i32);
+
+        #[derive(Component, Clone)]
+        struct Tag;
+
+        /// Helper to create a world with entities distributed across archetypes
+        fn setup_uneven_world(distributions: &[(usize, bool)]) -> World {
+            let mut world = World::new();
+            for (count, has_tag) in distributions {
+                for i in 0..*count {
+                    if *has_tag {
+                        world.spawn_with((Value(i as i32), Tag));
+                    } else {
+                        world.spawn_with(Value(i as i32));
+                    }
+                }
+            }
+            world
+        }
+
+        #[test]
+        fn par_for_each_single_archetype() {
+            let mut world = World::new();
+            for i in 0..1000 {
+                world.spawn_with(Value(i));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+            let sum = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                let sum = Arc::clone(&sum);
+                world.query::<&Value>().par_for_each_chunk(&pool, 64, move |v| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    sum.fetch_add(v.0 as usize, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 1000);
+            // Sum of 0..1000 = 999 * 1000 / 2 = 499500
+            assert_eq!(sum.load(Ordering::SeqCst), 499500);
+        }
+
+        #[test]
+        fn par_for_each_chunk_multiple_archetypes_even() {
+            // 4 archetypes with 250 entities each
+            let mut world = setup_uneven_world(&[
+                (250, false),
+                (250, true),
+            ]);
+            // Add two more archetypes by adding different component combos
+            for i in 0..250 {
+                world.spawn_with((Value(i), Velocity { x: 0.0, y: 0.0 }));
+            }
+            for i in 0..250 {
+                world.spawn_with((Value(i), Tag, Velocity { x: 0.0, y: 0.0 }));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                world.query::<&Value>().par_for_each_chunk(&pool, 64, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 1000);
+        }
+
+        #[test]
+        fn par_for_each_chunk_very_uneven_distribution() {
+            // One huge archetype, several tiny ones
+            // This tests that chunks span archetype boundaries correctly
+            
+            // Need to create distinct archetypes
+            let mut world = World::new();
+            // Archetype 1: Value only (10000 entities)
+            for i in 0..10000 {
+                world.spawn_with(Value(i));
+            }
+            // Archetype 2: Value + Tag (5 entities)
+            for i in 0..5 {
+                world.spawn_with((Value(10000 + i), Tag));
+            }
+            // Archetype 3: Value + Velocity (3 entities)
+            for i in 0..3 {
+                world.spawn_with((Value(10005 + i), Velocity { x: 0.0, y: 0.0 }));
+            }
+            // Archetype 4: Value + Tag + Velocity (7 entities)
+            for i in 0..7 {
+                world.spawn_with((Value(10008 + i), Tag, Velocity { x: 0.0, y: 0.0 }));
+            }
+            // Archetype 5: Value + Acceleration (2 entities)
+            for i in 0..2 {
+                world.spawn_with((Value(10015 + i), Acceleration { x: 0.0, y: 0.0 }));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+            let total = 10000 + 5 + 3 + 7 + 2;
+
+            {
+                let count = Arc::clone(&count);
+                world.query::<&Value>().par_for_each_chunk(&pool, 256, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), total);
+        }
+
+        #[test]
+        fn par_for_each_chunk_mutable_access() {
+            let mut world = World::new();
+            for i in 0..500 {
+                world.spawn_with(Value(i));
+            }
+
+            let pool = TaskPool::new();
+
+            // Double all values in parallel
+            world.query::<&mut Value>().par_for_each_chunk(&pool, 32, |v| {
+                v.0 *= 2;
+            });
+
+            // Verify all values were doubled
+            let sum: i32 = world.query::<&Value>().iter().map(|v| v.0).sum();
+            // Original sum: 0..500 = 499 * 500 / 2 = 124750
+            // Doubled: 249500
+            assert_eq!(sum, 249500);
+        }
+
+        #[test]
+        fn par_for_each_chunk_larger_than_total() {
+            let mut world = World::new();
+            for i in 0..10 {
+                world.spawn_with(Value(i));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                // Chunk size 1000 but only 10 entities - should still work
+                world.query::<&Value>().par_for_each_chunk(&pool, 1000, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 10);
+        }
+
+        #[test]
+        fn par_for_each_chunk_size_one() {
+            let mut world = World::new();
+            for i in 0..100 {
+                world.spawn_with(Value(i));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                // Extreme case: chunk size 1 means each entity is a separate task
+                world.query::<&Value>().par_for_each_chunk(&pool, 1, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 100);
+        }
+
+        #[test]
+        fn par_for_each_chunk_empty_query() {
+            let mut world = World::new();
+            // No entities with Value component
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                world.query::<&Value>().par_for_each_chunk(&pool, 64, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 0);
+        }
+
+        #[test]
+        fn par_for_each_chunk_spanning_verification() {
+            // Test that chunks properly span archetypes
+            // 3 archetypes with sizes that don't divide evenly by chunk size
+            let mut world = World::new();
+            
+            // Archetype 1: 67 entities
+            for i in 0..67 {
+                world.spawn_with(Value(i));
+            }
+            // Archetype 2: 130 entities
+            for i in 0..130 {
+                world.spawn_with((Value(67 + i), Tag));
+            }
+            // Archetype 3: 50 entities
+            for i in 0..50 {
+                world.spawn_with((Value(197 + i), Velocity { x: 0.0, y: 0.0 }));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+            let sum = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                let sum = Arc::clone(&sum);
+                world.query::<&Value>().par_for_each_chunk(&pool, 64, move |v| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    sum.fetch_add(v.0 as usize, Ordering::Relaxed);
+                });
+            }
+
+            let total = 67 + 130 + 50;
+            assert_eq!(count.load(Ordering::SeqCst), total);
+            
+            // Sum of 0..247 = 246 * 247 / 2 = 30381
+            assert_eq!(sum.load(Ordering::SeqCst), 30381);
+        }
+        
+        #[test]
+        fn par_for_each_basic() {
+            let mut world = World::new();
+            for i in 0..1000 {
+                world.spawn_with(Value(i));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+            let sum = Arc::new(AtomicI64::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                let sum = Arc::clone(&sum);
+                world.query::<&Value>().par_for_each(&pool, move |v| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                    sum.fetch_add(v.0 as i64, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 1000);
+            // Sum of 0..1000 = 999 * 1000 / 2 = 499500
+            assert_eq!(sum.load(Ordering::SeqCst), 499500);
+        }
+        
+        #[test]
+        fn par_for_each_small_runs_sequential() {
+            // Below SEQ_THRESHOLD (128), should run sequentially
+            let mut world = World::new();
+            for i in 0..50 {
+                world.spawn_with(Value(i));
+            }
+
+            let pool = TaskPool::new();
+            let count = Arc::new(AtomicUsize::new(0));
+
+            {
+                let count = Arc::clone(&count);
+                world.query::<&Value>().par_for_each(&pool, move |_| {
+                    count.fetch_add(1, Ordering::Relaxed);
+                });
+            }
+
+            assert_eq!(count.load(Ordering::SeqCst), 50);
+        }
     }
 }
 

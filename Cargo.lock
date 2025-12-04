@@ -628,6 +628,7 @@ dependencies = [
  "nimbus_macro_ecs",
  "num_cpus",
  "rayon",
+ "smallvec",
 ]
 
 [[package]]

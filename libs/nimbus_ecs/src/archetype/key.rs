@@ -10,39 +10,62 @@ use crate::util::TypeHashSet;
 
 /// Identifies a unique combination of component types.
 /// Uses a HashSet with identity hasher for O(1) lookups.
+/// TODO: For now this is fine, but if we controlled the hash lookup we could do better
+/// Current the hash has to be recomputed, which ... it's a small hit, but it's a hit.
+/// We could save some cycles here and this is going to be a very hot path structure.
 #[derive(Clone, Default, Debug)]
 pub struct ArchetypeKey {
     types: TypeHashSet,
 }
 
 impl ArchetypeKey {
+    #[inline]
     pub fn new(types: Vec<TypeId>) -> Self {
         Self {
             types: types.into_iter().collect(),
         }
     }
 
+    #[inline]
+    pub fn from_iter(iter: impl Iterator<Item = TypeId>) -> Self {
+        Self {
+            types: iter.collect(),
+        }
+    }
+
+    #[inline]
+    pub fn from_slice(slice: &[TypeId]) -> Self {
+        Self {
+            types: slice.iter().copied().collect(),
+        }
+    }
+
+    #[inline]
     /// Returns an iterator over the component types in this archetype.
     pub fn iter(&self) -> impl Iterator<Item = &TypeId> {
         self.types.iter()
     }
 
+    #[inline]
     /// Returns the number of component types in this archetype.
     pub fn len(&self) -> usize {
         self.types.len()
     }
 
+    #[inline]
     /// Returns true if this archetype has no component types.
     pub fn is_empty(&self) -> bool {
         self.types.is_empty()
     }
 
+    #[inline]
     /// Returns true if this archetype contains the given type.
     #[inline]
     pub fn contains(&self, ty: TypeId) -> bool {
         self.types.contains(&ty)
     }
 
+    #[inline]
     /// Returns true if this archetype contains all the given types.
     pub fn contains_all(&self, types: &[TypeId]) -> bool {
         types.iter().all(|ty| self.contains(*ty))

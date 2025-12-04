@@ -71,7 +71,7 @@ fn get_existing_type_id(key_size: usize) -> TypeId {
 fn bench_contains(c: &mut Criterion) {
     let mut group = c.benchmark_group("contains");
 
-    for size in [5, 10, 20, 50, 100, 200] {
+    for size in [5, 10, 20, 50] {
         let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
         let key = ArchetypeKey::new(types);
 
@@ -96,7 +96,7 @@ fn bench_contains(c: &mut Criterion) {
 fn bench_with_type(c: &mut Criterion) {
     let mut group = c.benchmark_group("with_type");
 
-    for size in [5, 10, 20, 50, 100, 200] {
+    for size in [5, 10, 20, 50] {
         let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
         let key = ArchetypeKey::new(types);
 
@@ -113,7 +113,7 @@ fn bench_with_type(c: &mut Criterion) {
 fn bench_without_type(c: &mut Criterion) {
     let mut group = c.benchmark_group("without_type");
 
-    for size in [5, 10, 20, 50, 100, 200] {
+    for size in [5, 10, 20, 50] {
         let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
         let key = ArchetypeKey::new(types);
 
@@ -130,11 +130,11 @@ fn bench_without_type(c: &mut Criterion) {
 fn bench_new(c: &mut Criterion) {
     let mut group = c.benchmark_group("new");
 
-    for size in [5, 10, 20, 50, 100, 200] {
+    for size in [5, 10, 20, 50] {
         let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
 
         group.bench_with_input(BenchmarkId::new("construct", size), &types, |b, types| {
-            b.iter(|| black_box(ArchetypeKey::new(black_box(types.clone()))))
+            b.iter(|| black_box(ArchetypeKey::from_iter(black_box(types.iter().copied()))))
         });
     }
 
@@ -144,7 +144,7 @@ fn bench_new(c: &mut Criterion) {
 fn bench_contains_all(c: &mut Criterion) {
     let mut group = c.benchmark_group("contains_all");
 
-    for size in [5, 10, 20, 50, 100] {
+    for size in [5, 10, 20, 50] {
         let types: Vec<TypeId> = (0..size).map(get_type_id).collect();
         let key = ArchetypeKey::new(types);
 

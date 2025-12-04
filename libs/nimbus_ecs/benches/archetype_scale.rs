@@ -876,6 +876,465 @@ fn bench_single_system_iteration(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark parallel query iteration: favorable vs unfavorable workloads
+/// 
+/// - Favorable: Heavy computation per entity (parallelism helps)
+/// - Unfavorable: Trivial computation per entity (overhead dominates)
+fn bench_par_iter(c: &mut Criterion) {
+    use nimbus_ecs::task::TaskPool;
+    
+    // ========================================================================
+    // FAVORABLE CASE: Heavy per-entity work (simulated physics/animation)
+    // ========================================================================
+    {
+        let mut group = c.benchmark_group("par_iter_heavy");
+        group.sample_size(50);
+        
+        const ENTITY_COUNT: usize = 100_000;
+        
+        // Heavy work function - simulates expensive physics calculation
+        #[inline(never)]
+        fn heavy_work(pos: &mut nimbus::Position) {
+            // Simulate expensive computation (trig functions, sqrt, etc.)
+            for _ in 0..10 {
+                let sin_x = (pos.x * 0.01).sin();
+                let cos_y = (pos.y * 0.01).cos();
+                pos.x = pos.x * 0.99 + sin_x * 10.0 + pos.y.sqrt().abs();
+                pos.y = pos.y * 0.99 + cos_y * 10.0 + pos.x.sqrt().abs();
+            }
+        }
+        
+        #[inline(never)]
+        fn heavy_work_bevy(pos: &mut bevy::Position) {
+            for _ in 0..10 {
+                let sin_x = (pos.x * 0.01).sin();
+                let cos_y = (pos.y * 0.01).cos();
+                pos.x = pos.x * 0.99 + sin_x * 10.0 + pos.y.sqrt().abs();
+                pos.y = pos.y * 0.99 + cos_y * 10.0 + pos.x.sqrt().abs();
+            }
+        }
+        
+        // Nimbus sequential
+        group.bench_function("nimbus_seq", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            
+            b.iter(|| {
+                for pos in world.query::<&mut nimbus::Position>().iter() {
+                    heavy_work(pos);
+                }
+            });
+        });
+        
+        // Nimbus par_for_each (auto-chunking)
+        group.bench_function("nimbus_par", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let pool = TaskPool::new();
+            
+            b.iter(|| {
+                world.query::<&mut nimbus::Position>().par_for_each(&pool, |pos| {
+                    heavy_work(pos);
+                });
+            });
+        });
+        
+        // Nimbus par_for_each_chunk (explicit chunking)
+        group.bench_function("nimbus_par_chunk", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let pool = TaskPool::new();
+            
+            b.iter(|| {
+                world.query::<&mut nimbus::Position>().par_for_each_chunk(&pool, 1024, |pos| {
+                    heavy_work(pos);
+                });
+            });
+        });
+        
+        // Bevy sequential
+        group.bench_function("bevy_seq", |b| {
+            let mut world = {
+                let mut w = bevy_ecs::world::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn(bevy::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let mut system_state: bevy_ecs::system::SystemState<
+                bevy_ecs::prelude::Query<&mut bevy::Position>,
+            > = bevy_ecs::system::SystemState::new(&mut world);
+            
+            b.iter(|| {
+                let mut query = system_state.get_mut(&mut world);
+                for mut pos in query.iter_mut() {
+                    heavy_work_bevy(&mut pos);
+                }
+            });
+        });
+        
+        // Bevy par_iter_mut
+        group.bench_function("bevy_par", |b| {
+            let mut world = {
+                let mut w = bevy_ecs::world::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn(bevy::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let mut system_state: bevy_ecs::system::SystemState<
+                bevy_ecs::prelude::Query<&mut bevy::Position>,
+            > = bevy_ecs::system::SystemState::new(&mut world);
+            
+            b.iter(|| {
+                let mut query = system_state.get_mut(&mut world);
+                query.par_iter_mut().for_each(|mut pos| {
+                    heavy_work_bevy(&mut pos);
+                });
+            });
+        });
+        
+        group.finish();
+    }
+    
+    // ========================================================================
+    // UNFAVORABLE CASE: Trivial per-entity work (parallelism overhead dominates)
+    // ========================================================================
+    {
+        let mut group = c.benchmark_group("par_iter_light");
+        group.sample_size(100);
+        
+        const ENTITY_COUNT: usize = 100_000;
+        
+        // Light work function - trivial arithmetic
+        #[inline(always)]
+        fn light_work(pos: &mut nimbus::Position) {
+            pos.x += 1.0;
+            pos.y += 1.0;
+        }
+        
+        #[inline(always)]
+        fn light_work_bevy(pos: &mut bevy::Position) {
+            pos.x += 1.0;
+            pos.y += 1.0;
+        }
+        
+        // Nimbus sequential
+        group.bench_function("nimbus_seq", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            
+            b.iter(|| {
+                for pos in world.query::<&mut nimbus::Position>().iter() {
+                    light_work(pos);
+                }
+            });
+        });
+        
+        // Nimbus par_for_each (auto-chunking)
+        group.bench_function("nimbus_par_auto", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let pool = TaskPool::new();
+            
+            b.iter(|| {
+                world.query::<&mut nimbus::Position>().par_for_each(&pool, |pos| {
+                    light_work(pos);
+                });
+            });
+        });
+        
+        // Nimbus par_for_each_chunk (various chunk sizes)
+        for chunk_size in [256, 1024, 4096] {
+            group.bench_function(format!("nimbus_par_chunk_{}", chunk_size), |b| {
+                let mut world = {
+                    let mut w = nimbus_ecs::World::new();
+                    for i in 0..ENTITY_COUNT {
+                        w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                    }
+                    w
+                };
+                let pool = TaskPool::new();
+                
+                b.iter(|| {
+                    world.query::<&mut nimbus::Position>().par_for_each_chunk(&pool, chunk_size, |pos| {
+                        light_work(pos);
+                    });
+                });
+            });
+        }
+        
+        // Bevy sequential  
+        group.bench_function("bevy_seq", |b| {
+            let mut world = {
+                let mut w = bevy_ecs::world::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn(bevy::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let mut system_state: bevy_ecs::system::SystemState<
+                bevy_ecs::prelude::Query<&mut bevy::Position>,
+            > = bevy_ecs::system::SystemState::new(&mut world);
+            
+            b.iter(|| {
+                let mut query = system_state.get_mut(&mut world);
+                for mut pos in query.iter_mut() {
+                    light_work_bevy(&mut pos);
+                }
+            });
+        });
+        
+        // Bevy par_iter_mut
+        group.bench_function("bevy_par", |b| {
+            let mut world = {
+                let mut w = bevy_ecs::world::World::new();
+                for i in 0..ENTITY_COUNT {
+                    w.spawn(bevy::Position { x: i as f32, y: i as f32 });
+                }
+                w
+            };
+            let mut system_state: bevy_ecs::system::SystemState<
+                bevy_ecs::prelude::Query<&mut bevy::Position>,
+            > = bevy_ecs::system::SystemState::new(&mut world);
+            
+            b.iter(|| {
+                let mut query = system_state.get_mut(&mut world);
+                query.par_iter_mut().for_each(|mut pos| {
+                    light_work_bevy(&mut pos);
+                });
+            });
+        });
+        
+        group.finish();
+    }
+    
+    // ========================================================================
+    // UNEVEN ARCHETYPES: Test spanning behavior with many small archetypes
+    // ========================================================================
+    {
+        let mut group = c.benchmark_group("par_iter_uneven");
+        group.sample_size(50);
+        
+        // Tag components to create unique archetypes
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagA;
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagB;
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagC;
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagD;
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagE;
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagF;
+        #[derive(nimbus_ecs::Component, Clone, Copy)] struct TagG;
+        
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagA;
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagB;
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagC;
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagD;
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagE;
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagF;
+        #[derive(bevy_ecs::component::Component, Clone, Copy)] struct BevyTagG;
+        
+        // Medium work - enough to benefit from parallelism
+        #[inline(never)]
+        fn medium_work(pos: &mut nimbus::Position) {
+            pos.x = (pos.x * 1.01 + pos.y * 0.1).sin() * 100.0;
+            pos.y = (pos.y * 1.01 + pos.x * 0.1).cos() * 100.0;
+        }
+        
+        #[inline(never)]
+        fn medium_work_bevy(pos: &mut bevy::Position) {
+            pos.x = (pos.x * 1.01 + pos.y * 0.1).sin() * 100.0;
+            pos.y = (pos.y * 1.01 + pos.x * 0.1).cos() * 100.0;
+        }
+        
+        // Nimbus with uneven archetypes
+        group.bench_function("nimbus_par", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                // Create archetypes with sizes: 5000, 100, 50, 25, 10000, 3, 20000, 7
+                // Total ~35,185 entities but very uneven distribution
+                for i in 0..5000 {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                for i in 0..100 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagA));
+                }
+                for i in 0..50 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagB));
+                }
+                for i in 0..25 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagC));
+                }
+                for i in 0..10000 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagD));
+                }
+                for i in 0..3 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagE));
+                }
+                for i in 0..20000 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagF));
+                }
+                for i in 0..7 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagG));
+                }
+                w
+            };
+            let pool = TaskPool::new();
+            
+            b.iter(|| {
+                world.query::<&mut nimbus::Position>().par_for_each(&pool, |pos| {
+                    medium_work(pos);
+                });
+            });
+        });
+        
+        // Nimbus par_for_each_chunk (explicit chunking)
+        group.bench_function("nimbus_par_chunk", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..5000 {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                for i in 0..100 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagA));
+                }
+                for i in 0..50 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagB));
+                }
+                for i in 0..25 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagC));
+                }
+                for i in 0..10000 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagD));
+                }
+                for i in 0..3 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagE));
+                }
+                for i in 0..20000 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagF));
+                }
+                for i in 0..7 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagG));
+                }
+                w
+            };
+            let pool = TaskPool::new();
+            
+            b.iter(|| {
+                world.query::<&mut nimbus::Position>().par_for_each_chunk(&pool, 512, |pos| {
+                    medium_work(pos);
+                });
+            });
+        });
+        
+        // Nimbus sequential for comparison
+        group.bench_function("nimbus_seq", |b| {
+            let mut world = {
+                let mut w = nimbus_ecs::World::new();
+                for i in 0..5000 {
+                    w.spawn_with(nimbus::Position { x: i as f32, y: i as f32 });
+                }
+                for i in 0..100 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagA));
+                }
+                for i in 0..50 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagB));
+                }
+                for i in 0..25 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagC));
+                }
+                for i in 0..10000 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagD));
+                }
+                for i in 0..3 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagE));
+                }
+                for i in 0..20000 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagF));
+                }
+                for i in 0..7 {
+                    w.spawn_with((nimbus::Position { x: i as f32, y: i as f32 }, TagG));
+                }
+                w
+            };
+            
+            b.iter(|| {
+                for pos in world.query::<&mut nimbus::Position>().iter() {
+                    medium_work(pos);
+                }
+            });
+        });
+        
+        // Bevy parallel with same uneven distribution
+        group.bench_function("bevy_par", |b| {
+            let mut world = {
+                let mut w = bevy_ecs::world::World::new();
+                for i in 0..5000 {
+                    w.spawn(bevy::Position { x: i as f32, y: i as f32 });
+                }
+                for i in 0..100 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagA));
+                }
+                for i in 0..50 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagB));
+                }
+                for i in 0..25 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagC));
+                }
+                for i in 0..10000 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagD));
+                }
+                for i in 0..3 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagE));
+                }
+                for i in 0..20000 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagF));
+                }
+                for i in 0..7 {
+                    w.spawn((bevy::Position { x: i as f32, y: i as f32 }, BevyTagG));
+                }
+                w
+            };
+            let mut system_state: bevy_ecs::system::SystemState<
+                bevy_ecs::prelude::Query<&mut bevy::Position>,
+            > = bevy_ecs::system::SystemState::new(&mut world);
+            
+            b.iter(|| {
+                let mut query = system_state.get_mut(&mut world);
+                query.par_iter_mut().for_each(|mut pos| {
+                    medium_work_bevy(&mut pos);
+                });
+            });
+        });
+        
+        group.finish();
+    }
+}
+
 criterion_group!(
     benches,
     bench_iterate_movement,
@@ -886,5 +1345,6 @@ criterion_group!(
     bench_query_creation,
     bench_parallel_systems,
     bench_single_system_iteration,
+    bench_par_iter,
 );
 criterion_main!(benches);

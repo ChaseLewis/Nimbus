@@ -14,6 +14,36 @@ pub struct Archetypes {
     component_index: TypeHashMap<Vec<usize>>,
 }
 
+/// A Send+Sync wrapper around a pointer to Archetypes.
+/// 
+/// # Safety
+/// This is safe to use when:
+/// - The Archetypes reference outlives all uses of this pointer
+/// - No structural mutations (add/remove archetypes) occur during use
+/// - Only disjoint row ranges are accessed across threads
+#[derive(Clone, Copy)]
+pub struct SendArchetypesPtr(pub(crate) *const Archetypes);
+
+unsafe impl Send for SendArchetypesPtr {}
+unsafe impl Sync for SendArchetypesPtr {}
+
+impl SendArchetypesPtr {
+    /// Creates a new SendArchetypesPtr from an Archetypes reference.
+    #[inline]
+    pub fn new(archetypes: &Archetypes) -> Self {
+        Self(archetypes as *const Archetypes)
+    }
+    
+    /// Gets an archetype by index.
+    /// 
+    /// # Safety
+    /// The Archetypes must still be valid (not dropped or structurally modified).
+    #[inline]
+    pub unsafe fn get(&self, index: usize) -> Option<&Archetype> {
+        unsafe { (*self.0).get(index) }
+    }
+}
+
 #[allow(dead_code)]
 impl Archetypes {
     pub fn new() -> Self {
