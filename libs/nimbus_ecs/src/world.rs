@@ -861,6 +861,21 @@ impl World {
         &mut self.archetypes
     }
 
+    /// Returns an iterator over all living entities in the world.
+    pub fn entities(&self) -> impl Iterator<Item = Entity> + '_ {
+        self.entities.iter()
+    }
+
+    /// Returns the archetype index for an entity.
+    pub fn entity_archetype(&self, entity: Entity) -> Option<usize> {
+        self.entities.location(entity).map(|loc| loc.archetype)
+    }
+
+    /// Returns the row (slot) of an entity within its archetype.
+    pub fn entity_row(&self, entity: Entity) -> Option<usize> {
+        self.entities.location(entity).map(|loc| loc.slot)
+    }
+
     fn ensure_alive(&self, entity: Entity) -> Result<(), WorldError> {
         if self.entities.is_alive(entity) {
             Ok(())

@@ -5,5 +5,6 @@ members = [
     "libs/nimbus_engine",
     "libs/nimbus_ecs",
     "libs/nimbus_macro_ecs",
-    "examples/basic"
+    "examples/basic",
+    "examples/save_load_world",
 ]

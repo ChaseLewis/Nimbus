@@ -13,6 +13,7 @@
 use std::any::TypeId;
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::RwLock;
 use std::collections::HashMap;
 
 use crate::commands::CommandQueue;
@@ -139,15 +140,15 @@ impl AccessTracker {
 pub struct ParallelWorldCell<'w> {
     /// World wrapped in UnsafeCell for interior mutability
     world: UnsafeCell<&'w mut World>,
-    /// Per-component-type access tracking
-    trackers: UnsafeCell<HashMap<TypeId, AccessTracker>>,
+    /// Per-component-type access tracking (RwLock for thread-safe lazy init)
+    trackers: RwLock<HashMap<TypeId, AccessTracker>>,
     /// Command queue reference for this cell
     command_queue: Option<*const std::cell::RefCell<CommandQueue>>,
 }
 
 // SAFETY: ParallelWorldCell is designed for controlled concurrent access.
-// The trackers HashMap is only modified during single-threaded setup.
-// During parallel execution, only atomic operations are used.
+// The trackers HashMap is protected by RwLock for thread-safe initialization.
+// During parallel execution, atomic operations in AccessTracker handle concurrent access.
 // Access to World is controlled via acquire_read/acquire_write guards.
 unsafe impl<'w> Send for ParallelWorldCell<'w> {}
 unsafe impl<'w> Sync for ParallelWorldCell<'w> {}
@@ -157,7 +158,7 @@ impl<'w> ParallelWorldCell<'w> {
     pub fn new(world: &'w mut World) -> Self {
         Self {
             world: UnsafeCell::new(world),
-            trackers: UnsafeCell::new(HashMap::new()),
+            trackers: RwLock::new(HashMap::new()),
             command_queue: None,
         }
     }
@@ -166,7 +167,7 @@ impl<'w> ParallelWorldCell<'w> {
     pub fn with_commands(world: &'w mut World, commands: &'w std::cell::RefCell<CommandQueue>) -> Self {
         Self {
             world: UnsafeCell::new(world),
-            trackers: UnsafeCell::new(HashMap::new()),
+            trackers: RwLock::new(HashMap::new()),
             command_queue: Some(commands as *const _),
         }
     }
@@ -191,18 +192,50 @@ impl<'w> ParallelWorldCell<'w> {
         unsafe { &mut **self.world.get() }
     }
 
-    /// Gets or creates a tracker for a component type.
-    fn get_tracker<T: 'static>(&self) -> &AccessTracker {
+    /// Gets or creates a tracker for a component type, then calls the provided function.
+    /// 
+    /// Uses read-lock fast path when tracker exists, write-lock only for creation.
+    fn with_tracker<T: 'static, R>(&self, f: impl FnOnce(&AccessTracker) -> R) -> R {
         let type_id = TypeId::of::<T>();
-        let trackers = unsafe { &mut *self.trackers.get() };
-        trackers.entry(type_id).or_insert_with(|| {
+        
+        // Fast path: try read lock first (most common case after initialization)
+        {
+            let trackers = self.trackers.read().unwrap();
+            if let Some(tracker) = trackers.get(&type_id) {
+                return f(tracker);
+            }
+        }
+        
+        // Slow path: need to create tracker, acquire write lock
+        let mut trackers = self.trackers.write().unwrap();
+        // Double-check after acquiring write lock (another thread may have created it)
+        let tracker = trackers.entry(type_id).or_insert_with(|| {
             AccessTracker::new(std::any::type_name::<T>())
-        })
+        });
+        f(tracker)
+    }
+
+    /// Releases read access for a component type.
+    fn release_read<T: 'static>(&self) {
+        let type_id = TypeId::of::<T>();
+        let trackers = self.trackers.read().unwrap();
+        if let Some(tracker) = trackers.get(&type_id) {
+            tracker.release_read();
+        }
+    }
+
+    /// Releases write access for a component type.
+    fn release_write<T: 'static>(&self) {
+        let type_id = TypeId::of::<T>();
+        let trackers = self.trackers.read().unwrap();
+        if let Some(tracker) = trackers.get(&type_id) {
+            tracker.release_write();
+        }
     }
 
     /// Acquires read access for a component type.
     pub fn acquire_read<T: 'static>(&self) -> ReadGuard<'w, '_, T> {
-        self.get_tracker::<T>().acquire_read();
+        self.with_tracker::<T, _>(|tracker| tracker.acquire_read());
         ReadGuard {
             cell: self,
             _marker: std::marker::PhantomData,
@@ -211,7 +244,7 @@ impl<'w> ParallelWorldCell<'w> {
 
     /// Acquires write access for a component type.
     pub fn acquire_write<T: 'static>(&self) -> WriteGuard<'w, '_, T> {
-        self.get_tracker::<T>().acquire_write();
+        self.with_tracker::<T, _>(|tracker| tracker.acquire_write());
         WriteGuard {
             cell: self,
             _marker: std::marker::PhantomData,
@@ -232,7 +265,7 @@ pub struct ReadGuard<'w, 'a, T: 'static> {
 
 impl<T: 'static> Drop for ReadGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.cell.get_tracker::<T>().release_read();
+        self.cell.release_read::<T>();
     }
 }
 
@@ -244,7 +277,7 @@ pub struct WriteGuard<'w, 'a, T: 'static> {
 
 impl<T: 'static> Drop for WriteGuard<'_, '_, T> {
     fn drop(&mut self) {
-        self.cell.get_tracker::<T>().release_write();
+        self.cell.release_write::<T>();
     }
 }
 

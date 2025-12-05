@@ -11,6 +11,7 @@ mod parallel_world;
 pub mod plugin;
 pub mod scheduler;
 pub mod serialization;
+pub mod serializers;
 mod system_param;
 mod systems;
 pub mod task;
@@ -28,7 +29,7 @@ pub use plugin::Plugin;
 pub use scheduler::{Priority, Scheduler, SystemId, SystemPriority};
 pub use serialization::{
     ComponentRegistration, ComponentRegistry,
-    serialize, deserialize,
+    serialize, deserialize, TextFormat,
 };
 pub use system_param::{EntityAPI, EntityRef, Query, QueryFilter, QueryIter, Single, SingleMut, SystemParamError, Tasks, With, Without};
 pub use systems::{IntoSystem, System};

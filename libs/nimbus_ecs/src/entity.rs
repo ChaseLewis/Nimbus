@@ -1,10 +1,40 @@
 use std::fmt;
+use serde::{Serialize, Deserialize, Serializer, Deserializer};
 
-/// Unique handle that an object inside the world
+/// Unique handle to an object inside the world.
+/// 
+/// When serialized, Entity stores only its index as a simple number.
+/// After deserializing a world, use the returned `EntityMap` to remap
+/// any Entity references in components to their new runtime values.
+/// 
+/// # Serialization Format
+/// 
+/// Entities serialize as simple integers (their index):
+/// ```json
+/// { "target": 0 }
+/// ```
+/// 
+/// After loading, use `entity_map.remap(entity)` to convert the
+/// deserialized index to a valid runtime Entity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct Entity {
     pub(crate) index: u32,
     pub(crate) generation: u32,
+}
+
+impl Serialize for Entity {
+    fn serialize<S: Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Serialize as just the index (file-local entity number)
+        serializer.serialize_u32(self.index)
+    }
+}
+
+impl<'de> Deserialize<'de> for Entity {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        // Deserialize from just the index, generation will be set after remapping
+        let index = u32::deserialize(deserializer)?;
+        Ok(Entity { index, generation: 0 })
+    }
 }
 
 impl Entity {
@@ -14,6 +44,15 @@ impl Entity {
     
     #[inline(always)]
     pub(crate) const fn new(index: u32, generation: u32) -> Self {
+        Self { index, generation }
+    }
+
+    /// Creates an entity from raw index and generation values.
+    /// 
+    /// This is mainly useful for deserialization and testing.
+    /// Note: This does not guarantee the entity is alive in any world.
+    #[inline(always)]
+    pub const fn from_raw(index: u32, generation: u32) -> Self {
         Self { index, generation }
     }
 
@@ -152,11 +191,12 @@ impl<'a> Iterator for EntitiesIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while self.index < self.entities.slots.len() {
+            let current = self.index;
             self.index += 1;
 
-            let slot = &self.entities.slots[self.index];
+            let slot = &self.entities.slots[current];
             if slot.is_alive() {
-                return Some(Entity::new(self.index as u32, slot.generation));
+                return Some(Entity::new(current as u32, slot.generation));
             }
         }
 

@@ -135,7 +135,7 @@ impl fmt::Display for ComponentId {
 /// #[component]
 /// struct Position { x: f32, y: f32 }
 ///
-/// // With custom ID (for stable serialization):
+/// // With custom ID (for stable serialization, you want them well distributed):
 /// #[component(id = 0x1234567890ABCDEF)]
 /// struct Velocity { x: f32, y: f32 }
 ///

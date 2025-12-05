@@ -265,6 +265,12 @@ impl Archetype {
         &self.key
     }
 
+    /// Returns a reference to the columns map for iteration.
+    #[inline]
+    pub fn columns(&self) -> &ComponentIdHashMap<Box<dyn Column>> {
+        &self.columns
+    }
+
     /// Returns the number of entities in this archetype.
     #[inline]
     pub fn len(&self) -> usize {

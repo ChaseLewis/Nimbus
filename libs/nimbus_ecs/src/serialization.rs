@@ -32,13 +32,25 @@ use crate::archetype::{Column, ColumnData};
 use crate::component::{Component, ComponentId};
 use crate::util::ComponentIdHashMap;
 
+/// Supported text serialization formats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TextFormat {
+    /// JSON - compact, single-line
+    #[default]
+    Json,
+    /// JSON with pretty-printing (multi-line, indented)
+    JsonPretty,
+}
+
 /// Error type for serialization operations.
 #[derive(Debug)]
 pub enum Error {
     /// IO error during read/write
     Io(std::io::Error),
-    /// Serialization format error
+    /// Serialization format error (binary)
     Bincode(bincode::Error),
+    /// Serialization format error (JSON)
+    Json(serde_json::Error),
     /// Unknown component type during deserialization
     UnknownType { type_name: String },
 }
@@ -47,7 +59,8 @@ impl std::fmt::Display for Error {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Error::Io(e) => write!(f, "IO error: {}", e),
-            Error::Bincode(e) => write!(f, "serialization error: {}", e),
+            Error::Bincode(e) => write!(f, "bincode error: {}", e),
+            Error::Json(e) => write!(f, "JSON error: {}", e),
             Error::UnknownType { type_name } => {
                 write!(f, "unknown component type: {}", type_name)
             }
@@ -66,6 +79,12 @@ impl From<std::io::Error> for Error {
 impl From<bincode::Error> for Error {
     fn from(e: bincode::Error) -> Self {
         Error::Bincode(e)
+    }
+}
+
+impl From<serde_json::Error> for Error {
+    fn from(e: serde_json::Error) -> Self {
+        Error::Json(e)
     }
 }
 
@@ -105,6 +124,15 @@ type ColumnPushFn = unsafe fn(column: &mut dyn Column, src: *const u8);
 /// reg.deserialize_ptr(&mut reader, temp.as_mut_ptr())?;
 /// unsafe { reg.push_to_column(&mut *column, temp.as_ptr()); }
 /// ```
+/// Text serialization function type (returns String for human-readable output)
+type SerializeTextFn = fn(*const u8, TextFormat) -> Result<String, Error>;
+/// Text deserialization function type (writes to raw pointer from string)
+type DeserializeTextFn = fn(&str, *mut u8, TextFormat) -> Result<(), Error>;
+/// Streaming JSON serialization (writes directly to a writer, no intermediate String)
+type SerializeJsonWriterFn = fn(*const u8, &mut dyn Write) -> Result<(), Error>;
+/// Default value factory (writes default value to pointer)
+type DefaultFn = fn(*mut u8);
+
 pub struct ComponentRegistration {
     /// Human-readable type name
     pub type_name: &'static str,
@@ -114,10 +142,18 @@ pub struct ComponentRegistration {
     align: usize,
     /// Function to get the component ID
     component_id_fn: ComponentIdFn,
-    /// Serialization function (reads from raw pointer)
+    /// Binary serialization function (reads from raw pointer)
     serialize_fn: SerializeFn,
-    /// Deserialization function (writes to raw pointer)
+    /// Binary deserialization function (writes to raw pointer)
     deserialize_fn: DeserializeFn,
+    /// Text serialization function (human-readable, supports multiple formats)
+    serialize_text_fn: SerializeTextFn,
+    /// Text deserialization function (human-readable, supports multiple formats)
+    deserialize_text_fn: DeserializeTextFn,
+    /// Streaming JSON serialization (no intermediate String allocation)
+    serialize_json_writer_fn: SerializeJsonWriterFn,
+    /// Default value factory (None if type doesn't implement Default)
+    default_fn: Option<DefaultFn>,
     /// Creates an empty column for this component type
     column_factory_fn: ColumnFactoryFn,
     /// Pushes raw component bytes to a column
@@ -125,7 +161,7 @@ pub struct ComponentRegistration {
 }
 
 impl ComponentRegistration {
-    /// Creates a new registration for type `T`.
+    /// Creates a new registration for type `T` without default support.
     ///
     /// This is typically called by the `#[component(serializable)]` macro.
     /// The `type_name` parameter is provided by the macro since `std::any::type_name`
@@ -147,9 +183,63 @@ impl ComponentRegistration {
                 // Safety: caller guarantees dst is valid, aligned, and has space for T
                 unsafe { deserialize_to_ptr::<T>(reader, dst) }
             },
+            serialize_text_fn: |src, format| {
+                // Safety: caller guarantees src points to a valid T
+                unsafe { serialize_text_from_ptr::<T>(src, format) }
+            },
+            deserialize_text_fn: |s, dst, format| {
+                // Safety: caller guarantees dst is valid, aligned, and has space for T
+                unsafe { deserialize_text_to_ptr::<T>(s, dst, format) }
+            },
+            serialize_json_writer_fn: |src, writer| {
+                // Safety: caller guarantees src points to a valid T
+                unsafe { serialize_json_to_writer::<T>(src, writer) }
+            },
+            default_fn: None,
             column_factory_fn: || Box::new(ColumnData::<T>::new()),
             column_push_fn: |column, src| {
                 // Safety: caller guarantees column is ColumnData<T> and src is valid T
+                unsafe { push_to_column_typed::<T>(column, src) }
+            },
+        }
+    }
+
+    /// Creates a new registration for type `T` with default support.
+    ///
+    /// Components registered with this will use `Default::default()` when
+    /// missing during deserialization.
+    ///
+    /// Use `#[component(serializable, default)]` to register with this.
+    pub const fn new_with_default<T>(type_name: &'static str) -> Self
+    where
+        T: Component + serde::Serialize + for<'de> serde::Deserialize<'de> + Default,
+    {
+        ComponentRegistration {
+            type_name,
+            size: std::mem::size_of::<T>(),
+            align: std::mem::align_of::<T>(),
+            component_id_fn: || T::COMPONENT_ID,
+            serialize_fn: |src, writer| {
+                unsafe { serialize_from_ptr::<T>(src, writer) }
+            },
+            deserialize_fn: |reader, dst| {
+                unsafe { deserialize_to_ptr::<T>(reader, dst) }
+            },
+            serialize_text_fn: |src, format| {
+                unsafe { serialize_text_from_ptr::<T>(src, format) }
+            },
+            deserialize_text_fn: |s, dst, format| {
+                unsafe { deserialize_text_to_ptr::<T>(s, dst, format) }
+            },
+            serialize_json_writer_fn: |src, writer| {
+                unsafe { serialize_json_to_writer::<T>(src, writer) }
+            },
+            default_fn: Some(|dst| {
+                // Safety: caller guarantees dst is valid and aligned for T
+                unsafe { std::ptr::write(dst as *mut T, T::default()) }
+            }),
+            column_factory_fn: || Box::new(ColumnData::<T>::new()),
+            column_push_fn: |column, src| {
                 unsafe { push_to_column_typed::<T>(column, src) }
             },
         }
@@ -171,6 +261,51 @@ impl ComponentRegistration {
     #[inline]
     pub fn align(&self) -> usize {
         self.align
+    }
+    
+    /// Returns true if this is a zero-sized type (marker component).
+    /// ZSTs are always optional during deserialization.
+    #[inline]
+    pub fn is_zst(&self) -> bool {
+        self.size == 0
+    }
+    
+    /// Returns true if this component has a default value.
+    /// Components with defaults are optional during deserialization.
+    #[inline]
+    pub fn has_default(&self) -> bool {
+        self.default_fn.is_some()
+    }
+    
+    /// Returns true if this component is optional during deserialization.
+    /// A component is optional if it's a ZST or has a default.
+    #[inline]
+    pub fn is_optional(&self) -> bool {
+        self.is_zst() || self.has_default()
+    }
+    
+    /// Writes the default value to the given pointer.
+    /// 
+    /// # Safety
+    /// 
+    /// - `dst` must be valid and properly aligned for this component type.
+    /// - `dst` must have space for at least `self.size()` bytes.
+    /// - For ZSTs, this is a no-op (nothing to write).
+    ///
+    /// # Panics
+    /// 
+    /// Panics if called on a non-optional component (no default and not ZST).
+    #[inline]
+    pub unsafe fn write_default(&self, dst: *mut u8) {
+        if self.is_zst() {
+            // ZSTs have no data to write
+            return;
+        }
+        if let Some(default_fn) = self.default_fn {
+            default_fn(dst);
+        } else {
+            panic!("write_default called on component without default: {}", self.type_name);
+        }
     }
     
     /// Serializes a component from a raw pointer.
@@ -195,6 +330,43 @@ impl ComponentRegistration {
     pub unsafe fn deserialize_ptr(&self, reader: &mut dyn Read, dst: *mut u8) -> Result<(), Error> {
         // Safety: caller guarantees dst is valid, aligned, and has space; we forward that
         unsafe { (self.deserialize_fn)(reader, dst) }
+    }
+    
+    /// Serializes a component to a human-readable text string.
+    ///
+    /// # Safety
+    ///
+    /// `src` must be a valid pointer to a value of this component's type.
+    #[inline]
+    pub unsafe fn serialize_text(&self, src: *const u8, format: TextFormat) -> Result<String, Error> {
+        // Safety: caller guarantees src is valid; we forward that guarantee to the fn pointer
+        (self.serialize_text_fn)(src, format)
+    }
+    
+    /// Deserializes a component from a text string into a raw pointer.
+    ///
+    /// # Safety
+    ///
+    /// - `dst` must be a valid pointer with proper alignment for this component type.
+    /// - `dst` must have enough space to hold this component (use `self.size()`).
+    /// - If `dst` points to an initialized value, it will be overwritten without dropping.
+    #[inline]
+    pub unsafe fn deserialize_text(&self, s: &str, dst: *mut u8, format: TextFormat) -> Result<(), Error> {
+        // Safety: caller guarantees dst is valid, aligned, and has space; we forward that
+        (self.deserialize_text_fn)(s, dst, format)
+    }
+    
+    /// Serializes a component directly to a writer as JSON (no intermediate String).
+    ///
+    /// This is faster than `serialize_text` because it avoids allocating a String.
+    ///
+    /// # Safety
+    ///
+    /// `src` must be a valid pointer to a value of this component's type.
+    #[inline]
+    pub unsafe fn serialize_json_to(&self, src: *const u8, writer: &mut dyn Write) -> Result<(), Error> {
+        // Safety: caller guarantees src is valid
+        (self.serialize_json_writer_fn)(src, writer)
     }
     
     /// Creates an empty column for this component type.
@@ -262,6 +434,45 @@ where
     let value: T = bincode::deserialize_from(reader)?;
     // Safety: caller guarantees dst is valid, aligned, and has space for T
     unsafe { std::ptr::write(dst as *mut T, value) };
+    Ok(())
+}
+
+// Text format serialization helpers
+// Safety: caller guarantees src points to a valid T
+unsafe fn serialize_text_from_ptr<T>(src: *const u8, format: TextFormat) -> Result<String, Error>
+where
+    T: serde::Serialize,
+{
+    // Safety: caller guarantees src points to a valid T
+    let value = unsafe { &*(src as *const T) };
+    let s = match format {
+        TextFormat::Json => serde_json::to_string(value)?,
+        TextFormat::JsonPretty => serde_json::to_string_pretty(value)?,
+    };
+    Ok(s)
+}
+
+// Safety: caller guarantees dst is valid, properly aligned, and has space for T
+unsafe fn deserialize_text_to_ptr<T>(s: &str, dst: *mut u8, _format: TextFormat) -> Result<(), Error>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    // Both Json and JsonPretty use the same deserializer
+    let value: T = serde_json::from_str(s)?;
+    // Safety: caller guarantees dst is valid, aligned, and has space for T
+    unsafe { std::ptr::write(dst as *mut T, value) };
+    Ok(())
+}
+
+// Streaming JSON serialization - writes directly to writer, no intermediate String
+// Safety: caller guarantees src points to a valid T
+unsafe fn serialize_json_to_writer<T>(src: *const u8, writer: &mut dyn Write) -> Result<(), Error>
+where
+    T: serde::Serialize,
+{
+    // Safety: caller guarantees src points to a valid T
+    let value = unsafe { &*(src as *const T) };
+    serde_json::to_writer(writer, value)?;
     Ok(())
 }
 
@@ -342,7 +553,7 @@ impl ComponentRegistry {
     /// # Panics
     ///
     /// Panics if a `ComponentId` collision is detected. This indicates either:
-    /// - A hash collision (extremely rare with 64-bit FNV-1a)
+    /// - A hash collision (extremely rare with 64-bit FNV-1a + MurmurHash3 Finalizer)
     /// - Two types with the same explicit ID
     ///
     /// The panic message includes both type names to help resolve the collision
