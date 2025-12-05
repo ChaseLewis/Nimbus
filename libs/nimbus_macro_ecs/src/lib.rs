@@ -29,43 +29,53 @@ use syn::{DeriveInput, Ident, parse_macro_input, ItemStruct, parse::Parse, parse
 ///
 /// # Serializable Components
 ///
-/// Add `serializable` to enable automatic serialization registration:
+/// Add `serializable` to enable automatic serialization registration.
+/// By default, `Default` is auto-derived and the component is optional during deserialization:
 ///
 /// ```ignore
+/// // Default is auto-derived, component is optional
 /// #[component(serializable)]
-/// struct Health {
-///     current: f32,
-///     max: f32,
-/// }
-///
-/// // With both custom ID and serialization:
-/// #[component(id = 0xDEADBEEF, serializable)]
-/// struct Transform { ... }
-/// ```
-///
-/// # Optional Components with Defaults
-///
-/// Add `default` to allow omitting the component during deserialization:
-///
-/// ```ignore
-/// #[component(serializable, default)]
-/// #[derive(Default)]
 /// struct Velocity { dx: f32, dy: f32 }
 /// ```
 ///
-/// ZSTs (zero-sized types) are always optional:
+/// # Custom Default
+///
+/// Use `custom_default` when you want to provide your own `Default` implementation:
+///
+/// ```ignore
+/// #[component(serializable, custom_default)]
+/// struct Health { current: i32, max: i32 }
+///
+/// impl Default for Health {
+///     fn default() -> Self { Self { current: 100, max: 100 } }
+/// }
+/// ```
+///
+/// # Required Components (No Default)
+///
+/// Use `no_default` for components that must always be provided:
+///
+/// ```ignore
+/// #[component(serializable, no_default)]
+/// struct Position { x: f32, y: f32 }  // Must be in serialized data
+/// ```
+///
+/// # ZSTs (Zero-Sized Types)
+///
+/// Marker components are always optional (no data to serialize):
 ///
 /// ```ignore
 /// #[component(serializable)]
-/// struct Player;  // Can always be omitted, no data to serialize
+/// struct Player;  // ZST - always optional
 /// ```
 ///
 /// # Attributes
 ///
 /// - `#[component]` - Basic component with auto-generated ID
 /// - `#[component(id = 0x...)]` - Component with explicit ID
-/// - `#[component(serializable)]` - Serializable component with auto-registration
-/// - `#[component(serializable, default)]` - Serializable with default (requires `Default` trait)
+/// - `#[component(serializable)]` - Serializable with auto-derived Default (optional)
+/// - `#[component(serializable, custom_default)]` - Serializable with user-provided Default
+/// - `#[component(serializable, no_default)]` - Serializable but required (no default)
 /// - `#[component(id = 0x..., serializable)]` - Both custom ID and serialization
 #[proc_macro_attribute]
 pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -121,22 +131,39 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     };
     
     if args.serializable {
-        let registration = if args.has_default {
-            quote! {
-                #crate_path::inventory::submit! {
-                    #crate_path::serialization::ComponentRegistration::new_with_default::<#name>(#name_str)
+        // Determine derives and registration based on default mode
+        let (derives, registration) = match args.default_mode {
+            DefaultMode::AutoDerive => (
+                // Auto-derive Default along with serde
+                quote! { #[derive(serde::Serialize, serde::Deserialize, Default)] },
+                quote! {
+                    #crate_path::inventory::submit! {
+                        #crate_path::serialization::ComponentRegistration::new_with_default::<#name>(#name_str)
+                    }
                 }
-            }
-        } else {
-            quote! {
-                #crate_path::inventory::submit! {
-                    #crate_path::serialization::ComponentRegistration::new::<#name>(#name_str)
+            ),
+            DefaultMode::Custom => (
+                // User provides Default impl, just derive serde
+                quote! { #[derive(serde::Serialize, serde::Deserialize)] },
+                quote! {
+                    #crate_path::inventory::submit! {
+                        #crate_path::serialization::ComponentRegistration::new_with_default::<#name>(#name_str)
+                    }
                 }
-            }
+            ),
+            DefaultMode::None => (
+                // No Default, component is required
+                quote! { #[derive(serde::Serialize, serde::Deserialize)] },
+                quote! {
+                    #crate_path::inventory::submit! {
+                        #crate_path::serialization::ComponentRegistration::new::<#name>(#name_str)
+                    }
+                }
+            ),
         };
         
         quote! {
-            #[derive(serde::Serialize, serde::Deserialize)]
+            #derives
             #struct_def
             
             #component_impl
@@ -152,12 +179,23 @@ pub fn component(attr: TokenStream, item: TokenStream) -> TokenStream {
     }.into()
 }
 
+/// How the Default trait is handled for serializable components
+#[derive(Default, Clone, Copy, PartialEq)]
+enum DefaultMode {
+    /// Auto-derive Default, component is optional (default behavior)
+    #[default]
+    AutoDerive,
+    /// User provides impl Default, component is optional
+    Custom,
+    /// No Default, component is required
+    None,
+}
+
 #[derive(Default)]
 struct ComponentArgs {
     id: Option<u64>,
     serializable: bool,
-    /// If true, the component implements Default and can be omitted during deserialization
-    has_default: bool,
+    default_mode: DefaultMode,
 }
 
 impl Parse for ComponentArgs {
@@ -169,8 +207,10 @@ impl Parse for ComponentArgs {
             
             if ident == "serializable" {
                 args.serializable = true;
-            } else if ident == "default" {
-                args.has_default = true;
+            } else if ident == "custom_default" {
+                args.default_mode = DefaultMode::Custom;
+            } else if ident == "no_default" {
+                args.default_mode = DefaultMode::None;
             } else if ident == "id" {
                 input.parse::<Token![=]>()?;
                 let lit: LitInt = input.parse()?;
@@ -185,7 +225,7 @@ impl Parse for ComponentArgs {
                     }
                 })?);
             } else {
-                return Err(syn::Error::new(ident.span(), "expected `serializable`, `default`, or `id`"));
+                return Err(syn::Error::new(ident.span(), "expected `serializable`, `custom_default`, `no_default`, or `id`"));
             }
             
             // Handle optional comma between args

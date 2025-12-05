@@ -17,37 +17,43 @@ use nimbus_ecs::serializers::json::{JsonSerializer, JsonDeserializer};
 // Game Components
 // ============================================================================
 
-/// 2D position in world space
-#[component(serializable)]
+/// 2D position in world space (required - no sensible default)
+#[component(serializable, no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Position {
     pub x: f32,
     pub y: f32,
 }
 
-/// 2D velocity for movement (optional, defaults to zero)
-#[component(serializable, default)]
-#[derive(Debug, Clone, PartialEq, Default)]
+/// 2D velocity for movement (optional - auto-derives Default to zero)
+#[component(serializable)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Velocity {
     pub dx: f32,
     pub dy: f32,
 }
 
-/// Entity health
-#[component(serializable)]
+/// Entity health (optional - custom default for full health)
+#[component(serializable, custom_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Health {
     pub current: i32,
     pub max: i32,
 }
 
-/// Player marker component (ZST - always optional, no data to serialize)
+impl Default for Health {
+    fn default() -> Self {
+        Self { current: 100, max: 100 }  // Full health by default
+    }
+}
+
+/// Player marker component (ZST - always optional, no data)
 #[component(serializable)]
-#[derive(Debug, Clone, PartialEq, Default)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Player;
 
-/// Enemy with a target entity reference
-#[component(serializable)]
+/// Enemy with a target entity reference (required - needs target)
+#[component(serializable, no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Enemy {
     pub aggro_range: f32,
@@ -55,20 +61,20 @@ pub struct Enemy {
     pub target: nimbus_ecs::Entity,
 }
 
-/// Collectible item
+/// Collectible item (optional - defaults to value 0)
 #[component(serializable)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Collectible {
     pub value: i32,
 }
 
-/// Name component for debugging
-#[component(serializable)]
+/// Name component for debugging (required - no sensible default)
+#[component(serializable, no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Name(pub String);
 
-/// A follower component - references another entity to follow
-#[component(serializable)]
+/// A follower component - references another entity to follow (required)
+#[component(serializable, no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Follows {
     pub target: nimbus_ecs::Entity,
