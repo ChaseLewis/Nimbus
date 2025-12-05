@@ -642,15 +642,15 @@ mod tests {
     use super::*;
     use crate::component;
     
-    // Test serializable component using the new attribute macro
-    #[component(serializable)]
+    // Test serializable component (default behavior)
+    #[component(no_default)]
     struct TestPosition {
         x: f32,
         y: f32,
     }
     
     // Test non-serializable component
-    #[component]
+    #[component(no_serialize)]
     struct TestVelocity {
         dx: f32,
         dy: f32,

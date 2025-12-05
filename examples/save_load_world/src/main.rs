@@ -18,7 +18,7 @@ use nimbus_ecs::serializers::json::{JsonSerializer, JsonDeserializer};
 // ============================================================================
 
 /// 2D position in world space (required - no sensible default)
-#[component(serializable, no_default)]
+#[component(no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Position {
     pub x: f32,
@@ -26,7 +26,7 @@ pub struct Position {
 }
 
 /// 2D velocity for movement (optional - auto-derives Default to zero)
-#[component(serializable)]
+#[component]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Velocity {
     pub dx: f32,
@@ -34,7 +34,7 @@ pub struct Velocity {
 }
 
 /// Entity health (optional - custom default for full health)
-#[component(serializable, custom_default)]
+#[component(custom_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Health {
     pub current: i32,
@@ -48,12 +48,12 @@ impl Default for Health {
 }
 
 /// Player marker component (ZST - always optional, no data)
-#[component(serializable)]
+#[component]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Player;
 
 /// Enemy with a target entity reference (required - needs target)
-#[component(serializable, no_default)]
+#[component(no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Enemy {
     pub aggro_range: f32,
@@ -62,19 +62,19 @@ pub struct Enemy {
 }
 
 /// Collectible item (optional - defaults to value 0)
-#[component(serializable)]
+#[component]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Collectible {
     pub value: i32,
 }
 
 /// Name component for debugging (required - no sensible default)
-#[component(serializable, no_default)]
+#[component(no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Name(pub String);
 
 /// A follower component - references another entity to follow (required)
-#[component(serializable, no_default)]
+#[component(no_default)]
 #[derive(Debug, Clone, PartialEq)]
 pub struct Follows {
     pub target: nimbus_ecs::Entity,
